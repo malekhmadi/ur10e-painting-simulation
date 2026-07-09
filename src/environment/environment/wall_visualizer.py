@@ -21,13 +21,13 @@ class WallVisualizer(Node):
         # Markers republish continuously (RViz needs periodic refresh)
         self.marker_timer = self.create_timer(1.0, self.publish_markers)
         # Collision objects only need to be sent once (MoveIt keeps them until told otherwise)
-        self.scene_timer = self.create_timer(1.0, self.publish_collision_objects)
-        self.scene_published = False
+        #self.scene_timer = self.create_timer(1.0, self.publish_collision_objects)
+        #self.scene_published = False
 
         self.frame_id = "base_link"  # match this to your robot's planning frame
 
         self.walls = [
-            Wall(x=0.6, y=0.0, z=1.3, length=0.02, height=0.6, thickness=0.5, orientation=0),
+            Wall(x=0.0, y=0.8, z=1.3, length=0.7, height=0.6, thickness=0.03, orientation=0),
         ]
 
         self.get_logger().info('Wall visualizer initialized')
@@ -62,9 +62,9 @@ class WallVisualizer(Node):
             marker.color.a = 0.7
 
             self.marker_pub.publish(marker)
-
+"""
     def publish_collision_objects(self):
-        """Publish all walls as MoveIt collision objects (once)."""
+        Publish all walls as MoveIt collision objects (once).
         if self.scene_published:
             return
 
@@ -96,7 +96,7 @@ class WallVisualizer(Node):
         self.scene_pub.publish(scene)
         self.get_logger().info(f'Published {len(self.walls)} wall(s) to planning scene')
         self.scene_published = True
-
+"""
 
 def main(args=None):
     rclpy.init(args=args)

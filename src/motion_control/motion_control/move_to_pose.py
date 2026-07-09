@@ -3,6 +3,7 @@ from rclpy.node import Node
 from rclpy.callback_groups import ReentrantCallbackGroup
 from pymoveit2 import MoveIt2
 from pymoveit2.robots import ur
+from environment.wall import Wall
 
 
 class MoveToPose(Node):
@@ -20,12 +21,26 @@ class MoveToPose(Node):
             callback_group=callback_group,
         )
 
-        self.start_point = ([0.5, 0.0, 0.5], [0.0, 1.0, 0.0, 0.0])
-        self.end_point = ([0.5, 0.3, 0.5], [0.0, 1.0, 0.0, 0.0])
+        # Manually set start and end points here.
+        # Change the x, y, z values to the points you want the robot to reach.
+        self.start_point = (
+            [-0.2, 0.7, 1.1],  # [x, y, z]
+            [0.0, 0.0, 0.0, 1.0],  # quaternion [x, y, z, w]
+        )
+        self.end_point = (
+            [0.4, 0.7, 1.1],  # [x, y, z]
+            [0.0, 0.0, 0.0, 1.0],  # quaternion [x, y, z, w]
+        )
 
     def move_to(self, pose):
         position, quat_xyzw = pose
-        self.moveit2.move_to_pose(position=position, quat_xyzw=quat_xyzw)
+        self.moveit2.move_to_pose(
+            position=position,
+            quat_xyzw=quat_xyzw,
+            cartesian=True,
+            cartesian_max_step=0.002,
+            cartesian_fraction_threshold=0.5,
+        )
         success = self.moveit2.wait_until_executed()
         if success:
             self.get_logger().info('Move succeeded')
@@ -39,7 +54,7 @@ def main(args=None):
 
     node.get_logger().info('Moving to start point...')
     node.move_to(node.start_point)
-
+    
     node.get_logger().info('Moving to end point...')
     node.move_to(node.end_point)
 
