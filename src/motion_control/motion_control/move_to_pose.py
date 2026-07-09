@@ -21,16 +21,31 @@ class MoveToPose(Node):
             callback_group=callback_group,
         )
 
-        # Manually set start and end points here.
-        # Change the x, y, z values to the points you want the robot to reach.
-        self.start_point = (
-            [-0.2, 0.7, 1.1],  # [x, y, z]
-            [0.0, 0.0, 0.0, 1.0],  # quaternion [x, y, z, w]
-        )
-        self.end_point = (
-            [0.4, 0.7, 1.1],  # [x, y, z]
-            [0.0, 0.0, 0.0, 1.0],  # quaternion [x, y, z, w]
-        )
+        # Create wall object with dimensions
+        wall = Wall(x=0.0, y=0.7, z=1.1, length=0.6, height=0.6, thickness=0.03, orientation=0)
+
+        # Build a scan path that covers the full wall by moving left-right across the wall
+        # at several height levels, changing only the x-axis and z-axis values.
+        self.wall_path = self._build_wall_path(wall)
+
+    def _build_wall_path(self, wall):
+        """Create a simple left-to-right scan pattern for the full wall."""
+        quat = [-0.5, 0.5, 0.5, 0.5]
+        step = 0.05
+        num_steps = max(1, int(round(wall.height / step)))
+        poses = []
+
+        for i in range(num_steps):
+            z = wall.z + i * step
+            if i % 2 == 0:
+                poses.append(([wall.x - wall.length / 2.0, wall.y, z], quat))
+                poses.append(([wall.x + wall.length / 2.0, wall.y, z], quat))
+            else:
+                poses.append(([wall.x + wall.length / 2.0, wall.y, z], quat))
+                poses.append(([wall.x - wall.length / 2.0, wall.y, z], quat))
+
+        return poses
+
 
     def move_to(self, pose):
         position, quat_xyzw = pose
@@ -39,7 +54,7 @@ class MoveToPose(Node):
             quat_xyzw=quat_xyzw,
             cartesian=True,
             cartesian_max_step=0.002,
-            cartesian_fraction_threshold=0.5,
+            cartesian_fraction_threshold=0.3,
         )
         success = self.moveit2.wait_until_executed()
         if success:
@@ -52,11 +67,9 @@ def main(args=None):
     rclpy.init(args=args)
     node = MoveToPose()
 
-    node.get_logger().info('Moving to start point...')
-    node.move_to(node.start_point)
-    
-    node.get_logger().info('Moving to end point...')
-    node.move_to(node.end_point)
+    node.get_logger().info('Moving along the full wall pattern...')
+    for pose in node.wall_path:
+        node.move_to(pose)
 
     node.destroy_node()
     rclpy.shutdown()

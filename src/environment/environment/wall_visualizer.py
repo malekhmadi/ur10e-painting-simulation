@@ -27,7 +27,7 @@ class WallVisualizer(Node):
         self.frame_id = "base_link"  # match this to your robot's planning frame
 
         self.walls = [
-            Wall(x=0.0, y=0.8, z=1.3, length=0.7, height=0.6, thickness=0.03, orientation=0),
+            Wall(x=0.0, y=0.8, z=1.3, length=0.6, height=0.6, thickness=0.03, orientation=0),
         ]
 
         self.get_logger().info('Wall visualizer initialized')
@@ -62,8 +62,8 @@ class WallVisualizer(Node):
             marker.color.a = 0.7
 
             self.marker_pub.publish(marker)
-"""
-    def publish_collision_objects(self):
+
+""" def publish_collision_objects(self):
         Publish all walls as MoveIt collision objects (once).
         if self.scene_published:
             return
