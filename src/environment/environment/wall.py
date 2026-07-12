@@ -1,4 +1,6 @@
-"""Wall object for environment simulation."""
+"""Wall and circle objects for environment simulation."""
+
+import math
 
 
 class Wall:
@@ -50,3 +52,49 @@ class Wall:
     def set_orientation(self, orientation):
         """Update the wall's orientation in radians."""
         self.orientation = orientation
+
+
+class Circle:
+    """Represents a circular target in the simulation environment."""
+
+    def __init__(self, x, y, z, radius, height, thickness=0.03, orientation=0):
+        self.x = x
+        self.y = y
+        self.z = z
+        self.radius = radius
+        self.height = height
+        self.thickness = thickness
+        self.orientation = orientation
+
+    def __repr__(self):
+        return (
+            f"Circle(x={self.x}, y={self.y}, z={self.z}, "
+            f"radius={self.radius}, height={self.height}, "
+            f"thickness={self.thickness}, orientation={self.orientation})"
+        )
+
+
+def create_default_wall():
+    """Return the shared wall definition used by the visualizer and motion nodes."""
+    return Wall(
+        x=0.0,
+        y=0.7,
+        z=1.1,
+        length=0.6,
+        height=0.6,
+        thickness=0.03,
+        orientation=0,
+    )
+
+
+def create_default_circle():
+    """Return the shared circular target definition used by the motion node."""
+    return Circle(
+        x=0.0,
+        y=0.8,
+        z=1.3,
+        radius=0.3,
+        height=0.04,
+        thickness=0.03,
+        orientation=0.5,
+    )

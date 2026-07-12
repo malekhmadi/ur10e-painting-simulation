@@ -6,7 +6,7 @@ from moveit_msgs.msg import CollisionObject, PlanningScene
 from shape_msgs.msg import SolidPrimitive
 from geometry_msgs.msg import Pose
 import math
-from environment.wall import Wall
+from environment.wall import create_default_circle, create_default_wall
 
 
 class WallVisualizer(Node):
@@ -21,40 +21,50 @@ class WallVisualizer(Node):
         # Markers republish continuously (RViz needs periodic refresh)
         self.marker_timer = self.create_timer(1.0, self.publish_markers)
         # Collision objects only need to be sent once (MoveIt keeps them until told otherwise)
-        #self.scene_timer = self.create_timer(1.0, self.publish_collision_objects)
-        #self.scene_published = False
+        self.scene_timer = self.create_timer(1.0, self.publish_collision_objects)
+        self.scene_published = False
 
-        self.frame_id = "base_link"  # match this to your robot's planning frame
+        self.frame_id = "base_link"
 
-        self.walls = [
-            Wall(x=0.0, y=0.8, z=1.3, length=0.6, height=0.6, thickness=0.03, orientation=0),
-        ]
+        self.object_type = 'circle'  # Default to circle; can be changed via parameter
+        self.objects = self._build_objects()
 
-        self.get_logger().info('Wall visualizer initialized')
+        self.get_logger().info(f'Wall visualizer initialized for {self.object_type}')
+
+    def _build_objects(self):
+        if self.object_type == 'circle':
+            return [create_default_circle()]
+        return [create_default_wall()]
 
     def publish_markers(self):
-        """Publish all walls as RViz markers (cosmetic only)."""
-        for i, wall in enumerate(self.walls):
+        """Publish the selected object as an RViz marker (cosmetic only)."""
+        for i, obj in enumerate(self.objects):
             marker = Marker()
             marker.header.frame_id = self.frame_id
             marker.header.stamp = self.get_clock().now().to_msg()
             marker.ns = "walls"
             marker.id = i
-            marker.type = Marker.CUBE
             marker.action = Marker.ADD
 
-            marker.pose.position.x = wall.x
-            marker.pose.position.y = wall.y
-            marker.pose.position.z = wall.z
+            marker.pose.position.x = obj.x
+            marker.pose.position.y = obj.y
+            marker.pose.position.z = obj.z
 
-            cos_half = math.cos(wall.orientation / 2)
-            sin_half = math.sin(wall.orientation / 2)
+            cos_half = math.cos(obj.orientation / 2)
+            sin_half = math.sin(obj.orientation / 2)
             marker.pose.orientation.w = cos_half
             marker.pose.orientation.z = sin_half
 
-            marker.scale.x = wall.length
-            marker.scale.y = wall.thickness
-            marker.scale.z = wall.height
+            if self.object_type == 'circle':
+                marker.type = Marker.CYLINDER
+                marker.scale.x = obj.radius * 2.0
+                marker.scale.y = obj.radius * 2.0
+                marker.scale.z = obj.height
+            else:
+                marker.type = Marker.CUBE
+                marker.scale.x = obj.length
+                marker.scale.y = obj.thickness
+                marker.scale.z = obj.height
 
             marker.color.r = 0.8
             marker.color.g = 0.2
@@ -63,48 +73,57 @@ class WallVisualizer(Node):
 
             self.marker_pub.publish(marker)
 
-""" def publish_collision_objects(self):
-        Publish all walls as MoveIt collision objects (once).
+    def publish_collision_objects(self):
+        """Publish the selected object as a MoveIt collision object (once)."""
         if self.scene_published:
             return
 
         scene = PlanningScene()
         scene.is_diff = True
 
-        for i, wall in enumerate(self.walls):
-            obj = CollisionObject()
-            obj.header.frame_id = self.frame_id
-            obj.id = f"wall_{i}"
+        for i, obj in enumerate(self.objects):
+            collision_obj = CollisionObject()
+            collision_obj.header.frame_id = self.frame_id
+            collision_obj.id = f"{self.object_type}_{i}"
 
             primitive = SolidPrimitive()
-            primitive.type = SolidPrimitive.BOX
-            primitive.dimensions = [wall.length, wall.thickness, wall.height]
+            if self.object_type == 'circle':
+                primitive.type = SolidPrimitive.CYLINDER
+                primitive.dimensions = [obj.height, obj.radius]
+            else:
+                primitive.type = SolidPrimitive.BOX
+                primitive.dimensions = [obj.length, obj.thickness, obj.height]
 
             pose = Pose()
-            pose.position.x = wall.x
-            pose.position.y = wall.y
-            pose.position.z = wall.z
-            pose.orientation.z = math.sin(wall.orientation / 2)
-            pose.orientation.w = math.cos(wall.orientation / 2)
+            pose.position.x = obj.x
+            pose.position.y = obj.y
+            pose.position.z = obj.z
+            pose.orientation.z = math.sin(obj.orientation / 2)
+            pose.orientation.w = math.cos(obj.orientation / 2)
 
-            obj.primitives.append(primitive)
-            obj.primitive_poses.append(pose)
-            obj.operation = CollisionObject.ADD
+            collision_obj.primitives.append(primitive)
+            collision_obj.primitive_poses.append(pose)
+            collision_obj.operation = CollisionObject.ADD
 
-            scene.world.collision_objects.append(obj)
+            scene.world.collision_objects.append(collision_obj)
 
         self.scene_pub.publish(scene)
-        self.get_logger().info(f'Published {len(self.walls)} wall(s) to planning scene')
+        self.get_logger().info(f'Published {len(self.objects)} {self.object_type}(s) to planning scene')
         self.scene_published = True
-"""
+
 
 def main(args=None):
     rclpy.init(args=args)
     node = WallVisualizer()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 
 if __name__ == '__main__':
     main()
+

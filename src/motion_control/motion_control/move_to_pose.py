@@ -3,7 +3,7 @@ from rclpy.node import Node
 from rclpy.callback_groups import ReentrantCallbackGroup
 from pymoveit2 import MoveIt2
 from pymoveit2.robots import ur
-from environment.wall import Wall
+from environment.wall import create_default_circle, create_default_wall
 
 
 class MoveToPose(Node):
@@ -21,12 +21,23 @@ class MoveToPose(Node):
             callback_group=callback_group,
         )
 
-        # Create wall object with dimensions
-        wall = Wall(x=0.0, y=0.7, z=1.1, length=0.6, height=0.6, thickness=0.03, orientation=0)
+        # Use the shared default objects defined in the environment module.
+        self.object_type = 'wall'
 
-        # Build a scan path that covers the full wall by moving left-right across the wall
-        # at several height levels, changing only the x-axis and z-axis values.
-        self.wall_path = self._build_wall_path(wall)
+        wall = create_default_wall()
+        circle = create_default_circle()
+        self.scan_path = self._build_scan_path(wall, circle)
+
+    def _build_scan_path(self, wall, circle=None):
+        """Return the correct scan path depending on the object type."""
+        if self.object_type == 'wall':
+            return self._build_wall_path(wall)
+        if self.object_type == 'circle':
+            return self._build_circle_path(circle or create_default_circle())
+        self.get_logger().warn(
+            f'Unknown object_type "{self.object_type}". Defaulting to wall scan.'
+        )
+        return self._build_wall_path(wall)
 
     def _build_wall_path(self, wall):
         """Create a simple left-to-right scan pattern for the full wall."""
@@ -34,15 +45,40 @@ class MoveToPose(Node):
         step = 0.05
         num_steps = max(1, int(round(wall.height / step)))
         poses = []
-
+        z1=wall.z-wall.height/2.0
         for i in range(num_steps):
-            z = wall.z + i * step
+            z = z1 + i * step
             if i % 2 == 0:
-                poses.append(([wall.x - wall.length / 2.0, wall.y, z], quat))
-                poses.append(([wall.x + wall.length / 2.0, wall.y, z], quat))
+                poses.append(([wall.x - wall.length / 2.0, wall.y-0.1, z], quat))
+                poses.append(([wall.x + wall.length / 2.0, wall.y-0.1, z], quat))
             else:
-                poses.append(([wall.x + wall.length / 2.0, wall.y, z], quat))
-                poses.append(([wall.x - wall.length / 2.0, wall.y, z], quat))
+                poses.append(([wall.x + wall.length / 2.0, wall.y-0.1, z], quat))
+                poses.append(([wall.x - wall.length / 2.0, wall.y-0.1, z], quat))
+
+        return poses
+
+    def _build_circle_path(self, circle):
+        """Create a right-up-left-up scan pattern for the circular object."""
+        quat = [-0.5, 0.5, 0.5, 0.5]
+        x_left = circle.x - circle.radius
+        x_right = circle.x + circle.radius
+        z_start = circle.z - circle.height / 2.0
+        z_end = circle.z + circle.height / 2.0
+        z_step = 0.05
+        poses = []
+
+        z = z_start
+        row = 0
+        while z <= z_end + 1e-6:
+            if row % 2 == 0:
+                poses.append(([x_left, circle.y, z], quat))
+                poses.append(([x_right, circle.y, z], quat))
+            else:
+                poses.append(([x_right, circle.y, z], quat))
+                poses.append(([x_left, circle.y, z], quat))
+
+            z += z_step
+            row += 1
 
         return poses
 
@@ -67,8 +103,8 @@ def main(args=None):
     rclpy.init(args=args)
     node = MoveToPose()
 
-    node.get_logger().info('Moving along the full wall pattern...')
-    for pose in node.wall_path:
+    node.get_logger().info(f'Moving along the {node.object_type} scan pattern...')
+    for pose in node.scan_path:
         node.move_to(pose)
 
     node.destroy_node()
