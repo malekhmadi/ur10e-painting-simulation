@@ -6,7 +6,7 @@
   <description>TODO: Package description</description>
   <maintainer email="malekhmadi280@gmail.com">malek</maintainer>
   <license>TODO: License declaration</license>
-
+  <exec_depend>environment</exec_depend>
   <depend>rclpy</depend>
   <depend>pymoveit2</depend>
   <depend>geometry_msgs</depend>

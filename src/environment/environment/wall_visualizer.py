@@ -26,7 +26,7 @@ class WallVisualizer(Node):
 
         self.frame_id = "base_link"
 
-        self.object_type = 'circle'  # Default to circle; can be changed via parameter
+        self.object_type = 'wall'  # Default to circle; can be changed via parameter
         self.objects = self._build_objects()
 
         self.get_logger().info(f'Wall visualizer initialized for {self.object_type}')

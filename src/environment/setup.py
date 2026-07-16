@@ -34,6 +34,7 @@ setup(
     entry_points={
         'console_scripts': [
             'wall_visualizer = environment.wall_visualizer:main',
+            'object_tf_publisher = environment.launch.object_tf.launch:main',
         ],
     },
 )
