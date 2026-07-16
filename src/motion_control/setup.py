@@ -26,6 +26,7 @@ setup(
         'console_scripts': [
             'move_to_pose = motion_control.move_to_pose:main',
             'paint_object = motion_control.paint_object:main',
+            'cal_pattern = motion_control.cal_pattern:main',
            # 'waypoint_recorder = motion_control.waypoint_recorder:main',
         ],
     },
