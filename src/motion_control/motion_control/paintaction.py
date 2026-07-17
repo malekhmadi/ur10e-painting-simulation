@@ -8,7 +8,7 @@ from environment.wall import create_default_circle, create_default_wall
 
 class MoveToPose(Node):
     def __init__(self):
-        super().__init__('move_to_pose')
+        super().__init__('paintaction')
 
         callback_group = ReentrantCallbackGroup()
 

@@ -24,10 +24,12 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'move_to_pose = motion_control.move_to_pose:main',
-            'paint_object = motion_control.paint_object:main',
-            'cal_pattern = motion_control.cal_pattern:main',
-           # 'waypoint_recorder = motion_control.waypoint_recorder:main',
+            'paintaction_ap1 = motion_control.paintaction_ap1:main',
+            'paintaction_ap2 = motion_control.paintaction_ap2:main',
+            'paintaction = motion_control.paintaction:main',
+            'cal_patten_ap1 = motion_control.cal_patten_ap1:main',
+            'cal_patten_ap2 = motion_control.cal_patten_ap2:main',
+            'cal_patten_ap3 = motion_control.cal_patten_ap3:main',
         ],
     },
 )

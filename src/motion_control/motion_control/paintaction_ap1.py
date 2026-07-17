@@ -32,7 +32,7 @@ class ObjectModel:
 
 class PaintObject(Node):
     def __init__(self):
-        super().__init__('paint_object')
+        super().__init__('paintaction_ap1')
 
         callback_group = ReentrantCallbackGroup()
         self.moveit2 = MoveIt2(

@@ -60,6 +60,48 @@ def generate_ordered_path(points, normals, band_height=2.0):
 
     return np.vstack(ordered_points), np.vstack(ordered_normals)
 
+def visualize_path(points, normals, output_path='/tmp/path_visualization.png', normal_length=0.02):
+    """
+    Plot the ordered path (as a connected line, colored by sweep order) and
+    the surface normals (as arrows) in 3D, saved to a PNG file.
+
+    Args:
+        points: (N, 3) array of ordered path positions
+        normals: (N, 3) array of corresponding normals
+        output_path: where to save the resulting image
+        normal_length: how long to draw each normal arrow, in the same units as points
+    """
+    import matplotlib
+    matplotlib.use('Agg')  # headless-safe backend, no display needed
+    import matplotlib.pyplot as plt
+
+    fig = plt.figure(figsize=(10, 8))
+    ax = fig.add_subplot(111, projection='3d')
+
+    # path line, colored by order (dark -> light shows sweep direction/progress)
+    ax.plot(points[:, 0], points[:, 1], points[:, 2], color='gray', linewidth=0.5, alpha=0.5)
+    scatter = ax.scatter(
+        points[:, 0], points[:, 1], points[:, 2],
+        c=np.arange(len(points)), cmap='viridis', s=8
+    )
+    fig.colorbar(scatter, ax=ax, label='path order (0 = start)')
+
+    # normals as short arrows from each point
+    ax.quiver(
+        points[:, 0], points[:, 1], points[:, 2],
+        normals[:, 0], normals[:, 1], normals[:, 2],
+        length=normal_length, color='red', linewidth=0.5, normalize=True
+    )
+
+    ax.set_xlabel('X (m)')
+    ax.set_ylabel('Y (m)')
+    ax.set_zlabel('Z (m)')
+    ax.set_title('Painting path — points ordered by color, normals in red')
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150)
+    print(f'Saved visualization to {output_path}')
+    
 def main():
     scale = 0.01  # matches obj.urdf's <mesh scale="..."/>
 
@@ -80,6 +122,8 @@ def main():
     print(f'Ordered into {len(ordered_points)} path points (meters)')
     print(f'First 3 ordered points:\n{ordered_points[:3]}')
     print(f'Last 3 ordered points:\n{ordered_points[-3:]}')
+
+    visualize_path(ordered_points, ordered_normals, output_path='/tmp/path_visualization.png')
 
 if __name__ == '__main__':
     main()
