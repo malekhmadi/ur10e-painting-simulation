@@ -167,12 +167,17 @@ class ActionZigzagPattern(Node):
         mesh.apply_scale(scale)
         # rotate the MESH itself before generating the path, so facet normals
         # and tangent frames are computed in the object's final orientation
-        #mesh.apply_transform(quaternion_to_matrix4(quaternion))
+        mesh.apply_transform(quaternion_to_matrix4(quaternion))
 
-        points, normals = generate_all_faces_zigzag(mesh, row_spacing=0.05)
+        points, normals = generate_all_faces_zigzag(
+            mesh,
+            row_spacing=0.05,
+            robot_position=np.array([0.0, 0.0, -1.0]),
+            angle_ranges=((20.0, 40.0), (70.0, 90.0)),
+        )
 
         # translation only now — rotation already baked into the mesh above
-        points = points 
+        points = points + translation 
 
         self.get_logger().info(f'Built zigzag path with {len(points)} points')
         return points, normals
@@ -198,7 +203,7 @@ def main(args=None):
 
     node.get_logger().info('Moving along the zigzag painting path...')
     for point, normal in zip(node.path_points, node.path_normals):
-        quat = [-0.5,0.5,0.5, 0.5] 
+        quat = normal_to_quaternion(normal) 
         node.move_to(point, quat)
 
     node.destroy_node()

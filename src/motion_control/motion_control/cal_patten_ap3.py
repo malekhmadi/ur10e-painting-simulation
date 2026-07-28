@@ -68,6 +68,8 @@ def read_object_pose_from_launch(package_name='environment', launch_filename='ob
 
     return np.array([x, y, z]), (roll, pitch, yaw)
 
+
+
 def get_tangent_frame(normal):
     """Build two orthogonal tangent vectors (U, V) lying on the plane
     perpendicular to the given normal."""
@@ -100,6 +102,37 @@ def build_face_polygon(mesh, face_indices, normal):
 
     return origin, u_axis, v_axis, hull_points, points_2d
 
+def filter_reachable_facets(mesh, robot_position, angle_ranges=((0.0, 90.0),)):
+    """
+    Keep only facets whose angle-to-robot falls within ANY of the given
+    angle_ranges (so you can select disjoint bands, e.g. "opposite" sides).
+
+    Args:
+        mesh: trimesh.Trimesh, already scaled and rotated into final orientation
+        robot_position: (3,) world-space position of the robot base
+        angle_ranges: iterable of (min_deg, max_deg) tuples. A facet is kept
+                      if its angle-to-robot falls inside ANY of these ranges.
+                      Example: ((0, 45), (70, 180)) keeps everything OUTSIDE
+                      the 45-70 band — i.e. the "opposite" of that band.
+
+    Returns:
+        list of (face_indices, normal, distance_to_robot) tuples for facets
+        that matched at least one range
+    """
+    kept = []
+    for face_indices, normal in zip(mesh.facets, mesh.facets_normal):
+        centroid = mesh.vertices[mesh.faces[face_indices]].reshape(-1, 3).mean(axis=0)
+        to_robot = robot_position - centroid
+        distance = np.linalg.norm(to_robot)
+        to_robot_dir = to_robot / distance if distance > 1e-9 else to_robot
+
+        cos_alignment = np.clip(np.dot(normal, to_robot_dir), -1.0, 1.0)
+        angle_deg = np.degrees(np.arccos(cos_alignment))
+
+        if any(lo <= angle_deg <= hi for lo, hi in angle_ranges):
+            kept.append((face_indices, normal, distance))
+
+    return kept
 
 def generate_zigzag_face_path(mesh, face_indices, normal, row_spacing=0.05, u_resolution=0.005):
     """
@@ -150,14 +183,21 @@ def generate_zigzag_face_path(mesh, face_indices, normal, row_spacing=0.05, u_re
     normals = np.tile(normal, (len(ordered_points), 1))
     return ordered_points, normals
 
-
-def generate_all_faces_zigzag(mesh, row_spacing=0.05, min_facet_area=1e-6):
-    """Run the zigzag path generator across every detected planar facet and
-    concatenate the results into one full trajectory."""
+def generate_all_faces_zigzag(mesh, row_spacing=0.05, min_facet_area=1e-6,
+                               robot_position=None, angle_ranges=((0.0, 90.0),)):
+    """Run the zigzag path generator across every facet whose angle-to-robot
+    falls within any of angle_ranges, ordered nearest-to-robot first."""
     all_points = []
     all_normals = []
 
-    for face_indices, normal in zip(mesh.facets, mesh.facets_normal):
+    if robot_position is not None:
+        facets_to_process = filter_reachable_facets(mesh, robot_position, angle_ranges)
+        facets_to_process.sort(key=lambda item: item[2])
+        facets_to_process = [(fi, n) for fi, n, _ in facets_to_process]
+    else:
+        facets_to_process = list(zip(mesh.facets, mesh.facets_normal))
+
+    for face_indices, normal in facets_to_process:
         area = mesh.area_faces[face_indices].sum()
         if area < min_facet_area:
             continue
@@ -170,7 +210,7 @@ def generate_all_faces_zigzag(mesh, row_spacing=0.05, min_facet_area=1e-6):
         all_normals.append(normals)
 
     if not all_points:
-        raise RuntimeError('No valid facets produced a path — check min_facet_area or row_spacing.')
+        raise RuntimeError('No valid facets produced a path — check angle_ranges, min_facet_area, or row_spacing.')
 
     return np.vstack(all_points), np.vstack(all_normals)
 
@@ -407,7 +447,7 @@ def visualize_paint_coverage(points, normals,
     plt.tight_layout()
     plt.savefig(output_path, dpi=150)
     print(f"Saved paint coverage visualization: {output_path}")
-    
+
 def main():
     scale = 3.0
 
@@ -436,11 +476,12 @@ def main():
 
     print(f"Mesh has {len(mesh.facets)} planar facets")
     print(f"Mesh bounds (meters): {mesh.bounds}")
-
     points, normals = generate_all_faces_zigzag(
         mesh,
-        row_spacing=0.05
-    )
+        row_spacing=0.05,
+        robot_position=np.array([0.0, 0.0, -1.0]),
+        angle_ranges=((20.0, 40.0), (70.0, 90.0)),
+)
 
     print(
         f"Generated {len(points)} total path points across all faces"
