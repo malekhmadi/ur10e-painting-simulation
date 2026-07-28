@@ -27,6 +27,7 @@ setup(
             'paintaction_ap1 = motion_control.paintaction_ap1:main',
             'paintaction_ap2 = motion_control.paintaction_ap2:main',
             'paintaction = motion_control.paintaction:main',
+            'paintaction_ap3 = motion_control.paintaction_ap3:main',
             'cal_patten_ap1 = motion_control.cal_patten_ap1:main',
             'cal_patten_ap2 = motion_control.cal_patten_ap2:main',
             'cal_patten_ap3 = motion_control.cal_patten_ap3:main',

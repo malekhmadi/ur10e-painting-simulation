@@ -1,4 +1,4 @@
-"""face_pattern.py — segment a mesh into planar faces, and build a per-face
+"""fcal_pattern_ap1.py — segment a mesh into planar faces, and build a per-face
 raster painting path for each one, then concatenate into one full trajectory."""
 
 from pathlib import Path
@@ -7,6 +7,64 @@ import numpy as np
 import trimesh
 from ament_index_python.packages import get_package_share_directory
 
+import xml.etree.ElementTree as ET
+
+def quaternion_to_matrix4(quat_xyzw):
+    """Build a 4x4 homogeneous rotation matrix from a quaternion (x, y, z, w),
+    suitable for trimesh.apply_transform()."""
+    x, y, z, w = quat_xyzw
+    rot3 = np.array([
+        [1 - 2*(y**2 + z**2),   2*(x*y - z*w),       2*(x*z + y*w)],
+        [2*(x*y + z*w),         1 - 2*(x**2 + z**2), 2*(y*z - x*w)],
+        [2*(x*z - y*w),         2*(y*z + x*w),       1 - 2*(x**2 + y**2)],
+    ])
+    matrix4 = np.eye(4)
+    matrix4[:3, :3] = rot3
+    return matrix4
+
+def euler_to_quaternion(roll, pitch, yaw):
+    """Convert roll/pitch/yaw (radians) to quaternion (x, y, z, w)."""
+    cr, sr = np.cos(roll * 0.5), np.sin(roll * 0.5)
+    cp, sp = np.cos(pitch * 0.5), np.sin(pitch * 0.5)
+    cy, sy = np.cos(yaw * 0.5), np.sin(yaw * 0.5)
+
+    w = cr * cp * cy + sr * sp * sy
+    x = sr * cp * cy - cr * sp * sy
+    y = cr * sp * cy + sr * cp * sy
+    z = cr * cp * sy - sr * sp * cy
+    return np.array([x, y, z, w])
+
+
+def rotate_vectors_by_quaternion(vectors, quat_xyzw):
+    """Rotate an (N, 3) array of vectors by a quaternion (x, y, z, w)."""
+    x, y, z, w = quat_xyzw
+    rot_matrix = np.array([
+        [1 - 2*(y**2 + z**2),   2*(x*y - z*w),       2*(x*z + y*w)],
+        [2*(x*y + z*w),         1 - 2*(x**2 + z**2), 2*(y*z - x*w)],
+        [2*(x*z - y*w),         2*(y*z + x*w),       1 - 2*(x**2 + y**2)],
+    ])
+    return vectors @ rot_matrix.T
+
+def read_mesh_scale_from_urdf(package_name='environment', urdf_filename='obj.urdf'):
+    """Read the <mesh scale="..."/> value directly from the object's URDF,
+    so painting-pattern code never has to hardcode it separately."""
+    urdf_path = Path(get_package_share_directory(package_name)) / 'urdf' / urdf_filename
+    if not urdf_path.exists():
+        raise FileNotFoundError(f'URDF not found: {urdf_path}')
+
+    tree = ET.parse(urdf_path)
+    root = tree.getroot()
+
+    mesh_elem = next(root.iter('mesh'), None)
+    if mesh_elem is None:
+        raise ValueError(f'No <mesh> tag found in URDF: {urdf_path}')
+
+    scale_attr = mesh_elem.get('scale', '1 1 1')
+    scale = [float(v) for v in scale_attr.split()]
+    if len(scale) != 3:
+        raise ValueError(f'Malformed scale attribute in URDF: {scale_attr}')
+
+    return scale  # [sx, sy, sz]
 
 def get_tangent_frame(normal):
     """Build two orthogonal tangent vectors (U, V) lying on the plane
@@ -208,24 +266,33 @@ def visualize_paint_coverage(points, normals, output_path='/tmp/face_paint_visua
     print(f'Saved paint coverage visualization to {output_path}')
 
 def main():
-    scale = 0.01
+    scale = read_mesh_scale_from_urdf()  # or hardcode, whichever version you currently have
 
+    # orientation to test — edit these to try different rotations
+    roll, pitch, yaw = 1.57, 0.0, 0.0
+    translation = np.array([0.0, 0.0, 0.0])
+    
     mesh_path = Path(get_package_share_directory('environment')) / 'meshes' / 'obj.stl'
     mesh = trimesh.load(mesh_path)
     if isinstance(mesh, trimesh.Scene):
         mesh = mesh.dump(concatenate=True)
 
     mesh.apply_scale(scale)
+    quat = euler_to_quaternion(roll, pitch, yaw)
+    mesh.apply_transform(quaternion_to_matrix4(quat))
 
     print(f'Mesh has {len(mesh.facets)} planar facets')
     print(f'Mesh bounds (meters): {mesh.bounds}')
 
     points, normals = generate_face_based_path(mesh, points_per_unit_area=120, band_count=6)
-    print(f'Generated {len(points)} total path points across all faces')
+    # translation only — no more rotating points/normals after the fact
+    points = points + translation
+    # apply orientation before visualizing, so the PNG reflects the rotated object
+    print(f'Generated {len(points)} total path points across all faces (rotated: roll={roll}, pitch={pitch}, yaw={yaw})')
 
     visualize_path(points, normals, output_path='/tmp/face_path_visualization.png')
     visualize_paint_coverage(points, normals, output_path='/tmp/face_paint_visualization.png',
-                              spray_radius=0.05)
+                              spray_radius=0.01)
 
 
 if __name__ == '__main__':

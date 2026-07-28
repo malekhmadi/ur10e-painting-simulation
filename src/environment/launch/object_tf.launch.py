@@ -11,12 +11,12 @@ def generate_launch_description():
     robot_description = urdf_path.read_text(encoding='utf-8')
 
     return LaunchDescription([
-        DeclareLaunchArgument('x', default_value='-0.4'),
-        DeclareLaunchArgument('y', default_value='0.55'),
-        DeclareLaunchArgument('z', default_value='1.0'),
+        DeclareLaunchArgument('x', default_value='0'),
+        DeclareLaunchArgument('y', default_value='0.5'),
+        DeclareLaunchArgument('z', default_value='1.2'),
         DeclareLaunchArgument('roll', default_value='0.0'),
         DeclareLaunchArgument('pitch', default_value='0.0'),
-        DeclareLaunchArgument('yaw', default_value='0.0'),
+        DeclareLaunchArgument('yaw', default_value='1.57'),
         DeclareLaunchArgument('parent_frame', default_value='world'),
         DeclareLaunchArgument('child_frame', default_value='object_link'),
 
@@ -33,9 +33,14 @@ def generate_launch_description():
             package='tf2_ros',
             executable='static_transform_publisher',
             arguments=[
-                LaunchConfiguration('x'), LaunchConfiguration('y'), LaunchConfiguration('z'),
-                LaunchConfiguration('roll'), LaunchConfiguration('pitch'), LaunchConfiguration('yaw'),
-                LaunchConfiguration('parent_frame'), LaunchConfiguration('child_frame'),
+                '--x', LaunchConfiguration('x'),
+                '--y', LaunchConfiguration('y'),
+                '--z', LaunchConfiguration('z'),
+                '--roll', LaunchConfiguration('roll'),
+                '--pitch', LaunchConfiguration('pitch'),
+                '--yaw', LaunchConfiguration('yaw'),
+                '--frame-id', LaunchConfiguration('parent_frame'),
+                '--child-frame-id', LaunchConfiguration('child_frame'),
             ],
         ),
     ])

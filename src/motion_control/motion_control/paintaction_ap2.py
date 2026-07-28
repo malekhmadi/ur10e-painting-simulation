@@ -3,23 +3,91 @@
 
 from pathlib import Path
 
+from matplotlib import scale
 import numpy as np
 import trimesh
+from motion_control.cal_patten_ap2 import quaternion_to_matrix4
 import rclpy
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.node import Node
-from rclpy.duration import Duration
 
 from ament_index_python.packages import get_package_share_directory
-from tf2_ros import Buffer, TransformListener
-from tf2_ros import LookupException, ConnectivityException, ExtrapolationException
-
 from pymoveit2 import MoveIt2
 from pymoveit2.robots import ur
 
 from motion_control.cal_patten_ap2 import generate_face_based_path
+import re
+import xml.etree.ElementTree as ET
 
 
+def read_mesh_scale_from_urdf(package_name='environment', urdf_filename='obj.urdf'):
+    """Read the <mesh scale="..."/> value directly from the object's URDF."""
+    urdf_path = Path(get_package_share_directory(package_name)) / 'urdf' / urdf_filename
+    if not urdf_path.exists():
+        raise FileNotFoundError(f'URDF not found: {urdf_path}')
+
+    tree = ET.parse(urdf_path)
+    root = tree.getroot()
+    mesh_elem = next(root.iter('mesh'), None)
+    if mesh_elem is None:
+        raise ValueError(f'No <mesh> tag found in URDF: {urdf_path}')
+
+    scale_attr = mesh_elem.get('scale', '1 1 1')
+    scale = [float(v) for v in scale_attr.split()]
+    if len(scale) != 3:
+        raise ValueError(f'Malformed scale attribute: {scale_attr}')
+    return scale
+
+def read_object_pose_from_launch(package_name='environment', launch_filename='object_tf.launch.py'):
+    """
+    Read x/y/z/roll/pitch/yaw default values directly out of the installed
+    object_tf.launch.py file, without needing a live TF listener.
+    """
+    launch_path = Path(get_package_share_directory(package_name)) / 'launch' / launch_filename
+    if not launch_path.exists():
+        raise FileNotFoundError(f'Launch file not found: {launch_path}')
+
+    text = launch_path.read_text(encoding='utf-8')
+
+    def extract(name, default):
+        match = re.search(
+            rf"DeclareLaunchArgument\(\s*['\"]{name}['\"]\s*,\s*default_value\s*=\s*['\"]([^'\"]+)['\"]",
+            text,
+        )
+        return float(match.group(1)) if match else default
+
+    x = extract('x', 0.0)
+    y = extract('y', 0.0)
+    z = extract('z', 0.0)
+    roll = extract('roll', 0.0)
+    pitch = extract('pitch', 0.0)
+    yaw = extract('yaw', 0.0)
+
+    return np.array([x, y, z]), (roll, pitch, yaw)
+
+def euler_to_quaternion(roll, pitch, yaw):
+    """Convert roll/pitch/yaw (radians) to quaternion (x, y, z, w)."""
+    cr, sr = np.cos(roll * 0.5), np.sin(roll * 0.5)
+    cp, sp = np.cos(pitch * 0.5), np.sin(pitch * 0.5)
+    cy, sy = np.cos(yaw * 0.5), np.sin(yaw * 0.5)
+
+    w = cr * cp * cy + sr * sp * sy
+    x = sr * cp * cy - cr * sp * sy
+    y = cr * sp * cy + sr * cp * sy
+    z = cr * cp * sy - sr * sp * cy
+    return np.array([x, y, z, w])
+
+"""
+def rotate_vectors_by_quaternion(vectors, quat_xyzw):
+    Rotate an (N, 3) array of vectors by a quaternion (x, y, z, w).
+    x, y, z, w = quat_xyzw
+    rot_matrix = np.array([
+        [1 - 2*(y**2 + z**2),   2*(x*y - z*w),       2*(x*z + y*w)],
+        [2*(x*y + z*w),         1 - 2*(x**2 + z**2), 2*(y*z - x*w)],
+        [2*(x*z - y*w),         2*(y*z + x*w),       1 - 2*(x**2 + y**2)],
+    ])
+    return vectors @ rot_matrix.T
+"""
 def normal_to_quaternion(normal, up_hint=np.array([0.0, 0.0, 1.0])):
     """
     Build a quaternion (x, y, z, w) that orients the tool's approach axis
@@ -77,7 +145,6 @@ def normal_to_quaternion(normal, up_hint=np.array([0.0, 0.0, 1.0])):
 class ActionFacePattern(Node):
     def __init__(self):
         super().__init__('paintaction_ap2')
-
         callback_group = ReentrantCallbackGroup()
         self.moveit2 = MoveIt2(
             node=self,
@@ -88,50 +155,32 @@ class ActionFacePattern(Node):
             callback_group=callback_group,
         )
 
-        self.tf_buffer = Buffer()
-        self.tf_listener = TransformListener(self.tf_buffer, self)
-
-        placement = self._lookup_object_transform()
-        self.path_points, self.path_normals = self._build_face_path(placement)
-
-    def _lookup_object_transform(self, parent_frame='world', child_frame='object_link', timeout_sec=10.0):
-        deadline = self.get_clock().now() + Duration(seconds=timeout_sec)
-        while rclpy.ok() and self.get_clock().now() < deadline:
-            try:
-                transform = self.tf_buffer.lookup_transform(
-                    parent_frame, child_frame, rclpy.time.Time()
-                )
-                t = transform.transform.translation
-                self.get_logger().info(
-                    f'Found live transform {parent_frame} -> {child_frame}: '
-                    f'x={t.x:.3f}, y={t.y:.3f}, z={t.z:.3f}'
-                )
-                return np.array([t.x, t.y, t.z])
-            except (LookupException, ConnectivityException, ExtrapolationException):
-                rclpy.spin_once(self, timeout_sec=0.2)
-
-        raise RuntimeError(
-            f'Could not find transform {parent_frame} -> {child_frame} after {timeout_sec}s. '
-            f'Is object_tf.launch.py running?'
+        translation, euler = read_object_pose_from_launch()
+        quaternion = euler_to_quaternion(*euler)
+        self.get_logger().info(
+            f'Object pose from launch file: pos={translation}, rpy={euler}'
         )
 
-    def _build_face_path(self, placement):
-        scale = 0.01
+        self.path_points, self.path_normals = self._build_face_path(translation, quaternion)
+
+
+    def _build_face_path(self, translation, quaternion):
+        scale = read_mesh_scale_from_urdf()
 
         mesh_path = Path(get_package_share_directory('environment')) / 'meshes' / 'obj.stl'
         mesh = trimesh.load(mesh_path)
         if isinstance(mesh, trimesh.Scene):
-            mesh = mesh.dump(concatenate=True)
+           mesh = mesh.dump(concatenate=True)
 
         mesh.apply_scale(scale)
+        mesh.apply_transform(quaternion_to_matrix4(quaternion))  # rotate mesh before path generation
 
         points, normals = generate_face_based_path(mesh, points_per_unit_area=50, band_count=6)
-
-        # shift from the mesh's local frame into world coordinates using the live TF placement
-        points = points + placement
+        points = points + translation  # translation only now
 
         self.get_logger().info(f'Built face-based path with {len(points)} points')
         return points, normals
+        
 
     def move_to(self, position, quat_xyzw):
         self.moveit2.move_to_pose(
@@ -139,7 +188,7 @@ class ActionFacePattern(Node):
             quat_xyzw=quat_xyzw,
             cartesian=True,
             cartesian_max_step=0.002,
-            cartesian_fraction_threshold=0.3,
+            cartesian_fraction_threshold=0.5,
         )
         success = self.moveit2.wait_until_executed()
         if success:
@@ -154,7 +203,7 @@ def main(args=None):
 
     node.get_logger().info('Moving along the face-based painting path...')
     for point, normal in zip(node.path_points, node.path_normals):
-        quat = [-0.5, 0.5, 0.5, 0.5]
+        quat = [-0.5,0.5,0.5, 0.5] 
         node.move_to(point, quat)
 
     node.destroy_node()
