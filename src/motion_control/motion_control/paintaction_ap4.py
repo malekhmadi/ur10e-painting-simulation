@@ -15,11 +15,20 @@ from ament_index_python.packages import get_package_share_directory
 from pymoveit2 import MoveIt2
 from pymoveit2.robots import ur
 
-from motion_control.cal_patten_ap4 import generate_surface_based_path
-
-
+from motion_control.cal_patten_ap4 import (
+    read_mesh_scale_from_urdf,
+    read_object_pose_from_launch,
+    euler_to_quaternion,
+    quaternion_to_matrix4,
+    generate_surface_based_path,
+    ROW_SPACING,
+    ROBOT_POSITION,
+    ANGLE_RANGES,
+    LIFT_DISTANCE,
+)
+"""
 def euler_to_quaternion(roll, pitch, yaw):
-    """Convert roll/pitch/yaw (radians) to quaternion (x, y, z, w)."""
+    Convert roll/pitch/yaw (radians) to quaternion (x, y, z, w).
     cr, sr = np.cos(roll * 0.5), np.sin(roll * 0.5)
     cp, sp = np.cos(pitch * 0.5), np.sin(pitch * 0.5)
     cy, sy = np.cos(yaw * 0.5), np.sin(yaw * 0.5)
@@ -32,8 +41,8 @@ def euler_to_quaternion(roll, pitch, yaw):
 
 
 def quaternion_to_matrix4(quat_xyzw):
-    """Build a 4x4 homogeneous rotation matrix from a quaternion (x, y, z, w),
-    suitable for trimesh.apply_transform()."""
+    Build a 4x4 homogeneous rotation matrix from a quaternion (x, y, z, w),
+    suitable for trimesh.apply_transform().
     x, y, z, w = quat_xyzw
     rot3 = np.array([
         [1 - 2*(y**2 + z**2),   2*(x*y - z*w),       2*(x*z + y*w)],
@@ -43,7 +52,7 @@ def quaternion_to_matrix4(quat_xyzw):
     matrix4 = np.eye(4)
     matrix4[:3, :3] = rot3
     return matrix4
-
+"""
 
 def normal_to_quaternion(normal, up_hint=np.array([0.0, 0.0, 1.0])):
     """Orient the tool's approach axis (-Z) opposite the given surface normal."""
@@ -171,11 +180,10 @@ class ActionSurfaceSegmentedPattern(Node):
 
         points, normals = generate_surface_based_path(
             mesh,
-            row_spacing=0.05,
-            min_facet_area=1e-6,
-            robot_position=np.array([0.0, 0.0, -1.0]),
-            angle_ranges=((90.0, 110.0),),
-            lift_distance=0.03,
+            row_spacing=ROW_SPACING,
+            robot_position=ROBOT_POSITION,
+            angle_ranges=ANGLE_RANGES,
+            lift_distance=LIFT_DISTANCE,
         )
 
         # translation only now — rotation already baked into the mesh above

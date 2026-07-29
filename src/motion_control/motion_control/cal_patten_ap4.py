@@ -17,6 +17,10 @@ from matplotlib.path import Path as MplPath
 from ament_index_python.packages import get_package_share_directory
 import xml.etree.ElementTree as ET
 
+ROW_SPACING = 0.05
+ROBOT_POSITION = np.array([0.0, 0.0, -1.0])
+ANGLE_RANGES = ((110.0, 140.0),)
+LIFT_DISTANCE = 0.03
 
 # ---------------------------------------------------------------------------
 # Step 0 — orientation / scale utilities (shared with ap3)
@@ -512,10 +516,10 @@ def main():
 
     points, normals = generate_surface_based_path(
         mesh,
-        row_spacing=0.05,
-        robot_position=np.array([0.0, 0.0, -1.0]),
-        angle_ranges=((90.0, 110.0),),
-        lift_distance=0.03,
+        row_spacing=ROW_SPACING,
+        robot_position=ROBOT_POSITION,
+        angle_ranges=ANGLE_RANGES,
+        lift_distance=LIFT_DISTANCE,
     )
 
     print(f"Generated {len(points)} total path points across all surfaces")
