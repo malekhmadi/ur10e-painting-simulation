@@ -19,7 +19,7 @@ import xml.etree.ElementTree as ET
 
 ROW_SPACING = 0.05
 ROBOT_POSITION = np.array([0.0, 0.0, -1.0])
-ANGLE_RANGES = ((110.0, 140.0),)
+ANGLE_RANGES = ((90.0, 110.0),)
 LIFT_DISTANCE = 0.03
 
 # ---------------------------------------------------------------------------
