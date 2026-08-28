@@ -1,0 +1,7 @@
+
+# ML artifacts — large/generated, don't commit
+ml/data/generated/
+ml/data/processed/
+ml/models/*.pt
+ml/models/*.onnx
+ml/venv/

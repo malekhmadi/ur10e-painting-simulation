@@ -35,6 +35,7 @@ setup(
             'cal_patten_ap4 = motion_control.cal_patten_ap4:main',
             'paint_marker = motion_control.paint_marker:main',
             'cal_patten_ap5 = motion_control.cal_patten_ap5:main',
+            'dataset_generator_ap1 = motion_control.dataset_generator_ap1:main',
         ],
     },
 )
