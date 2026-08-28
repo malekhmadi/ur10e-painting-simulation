@@ -17,7 +17,7 @@ from matplotlib.path import Path as MplPath
 from ament_index_python.packages import get_package_share_directory
 import xml.etree.ElementTree as ET
 
-ROW_SPACING = 0.05
+ROW_SPACING = 0.1
 ROBOT_POSITION = np.array([0.0, 0.0, -1.0])
 ANGLE_RANGES = ((90.0, 110.0),)
 LIFT_DISTANCE = 0.03
@@ -258,7 +258,7 @@ def determine_painting_direction(mesh, face_indices, normal):
 # Step 3 — generate parallel painting passes per surface
 # ---------------------------------------------------------------------------
 
-def generate_passes_for_surface(mesh, face_indices, normal, row_spacing=0.05, u_resolution=0.005):
+def generate_passes_for_surface(mesh, face_indices, normal, row_spacing, u_resolution=0.005):
     """
     Generate an edge-to-edge zigzag of parallel passes across one surface,
     swept along that surface's determined long-axis painting direction.
@@ -359,7 +359,7 @@ def connect_surfaces_smoothly(surface_paths, lift_distance=0.03, transition_step
 # Full pipeline
 # ---------------------------------------------------------------------------
 
-def generate_surface_based_path(mesh, row_spacing=0.05, min_facet_area=1e-6,
+def generate_surface_based_path(mesh, row_spacing, min_facet_area=1e-6,
                                  robot_position=None, angle_ranges=((0.0, 90.0),),
                                  lift_distance=0.03):
     """Run the full 5-step pipeline and return one continuous trajectory."""

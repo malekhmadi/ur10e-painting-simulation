@@ -112,7 +112,7 @@ class DatasetGenerator(Node):
         result['plan_found'] = trajectory is not None
         return result
 
-    def generate_dataset(self, output_path):
+    def generate_dataset(self, output_path, object_name):
         rows = []
         total = len(self.path_points)
         scale_x, scale_y, scale_z = self.scale
@@ -122,6 +122,7 @@ class DatasetGenerator(Node):
             result = self.check_reachable_and_collision_free(point, quat)
 
             rows.append({
+                'object_name': object_name,
                 'x': point[0], 'y': point[1], 'z': point[2],
                 'nx': normal[0], 'ny': normal[1], 'nz': normal[2],
                 'qx': quat[0], 'qy': quat[1], 'qz': quat[2], 'qw': quat[3],
@@ -134,15 +135,17 @@ class DatasetGenerator(Node):
             if (i + 1) % 25 == 0 or (i + 1) == total:
                 self.get_logger().info(f'Checked {i + 1}/{total} points')
 
-        with open(output_path, 'w', newline='') as f:
+        file_exists = output_path.exists()
+        with open(output_path, 'a', newline='') as f:  # 'a' = append, not overwrite
             writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-            writer.writeheader()
+            if not file_exists:
+                writer.writeheader()  # only write header once, on first run
             writer.writerows(rows)
 
         ik_ok = sum(r['ik_found'] for r in rows)
         plan_ok = sum(r['plan_found'] for r in rows)
         self.get_logger().info(
-            f'Saved {len(rows)} labeled points to {output_path}\n'
+            f'Appended {len(rows)} labeled points for "{object_name}" to {output_path}\n'
             f'  Scale: {self.scale}\n'
             f'  IK found: {ik_ok}/{len(rows)}\n'
             f'  Collision-free plan found: {plan_ok}/{len(rows)}'
@@ -152,10 +155,13 @@ def main(args=None):
     rclpy.init(args=args)
     node = DatasetGenerator()
 
-    output_path = Path.home() / 'ros2_project' / 'ml' / 'data' / 'generated' / 'dataset_ap1.csv'
+    import sys
+    object_name = sys.argv[1] if len(sys.argv) > 1 else 'unknown_object'
+
+    output_path = Path.home() / 'ros2_project' / 'ml' / 'data' / 'generated' / 'combined_dataset.csv'
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    node.generate_dataset(output_path)
+    node.generate_dataset(output_path, object_name)
 
     node.destroy_node()
     rclpy.shutdown()
