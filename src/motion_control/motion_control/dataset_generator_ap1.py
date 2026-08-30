@@ -30,6 +30,7 @@ from motion_control.cal_patten_ap4 import (
     ROBOT_POSITION,
     ANGLE_RANGES,
     LIFT_DISTANCE,
+    PAINT_DISTANCE,
 )
 
 
@@ -62,7 +63,7 @@ class DatasetGenerator(Node):
         self.get_logger().info(f'Object pose: pos={translation}, rpy=({roll}, {pitch}, {yaw})')
         return translation, quaternion
 
-    def _build_path(self, translation, quaternion):
+    def _build_path(self, translation, quaternion,angle_min, angle_max, row_spacing):
 
         mesh_path = Path(get_package_share_directory('environment')) / 'meshes' / 'obj.stl'
         mesh = trimesh.load(mesh_path)
@@ -74,10 +75,11 @@ class DatasetGenerator(Node):
 
         points, normals = generate_surface_based_path(
             mesh,
-            row_spacing=ROW_SPACING,
+            row_spacing=row_spacing,
             robot_position=ROBOT_POSITION,
-            angle_ranges=ANGLE_RANGES,
+            angle_ranges=((angle_min, angle_max),),
             lift_distance=LIFT_DISTANCE,
+            paint_distance=PAINT_DISTANCE,
         )
         points = points + translation
 
@@ -112,12 +114,15 @@ class DatasetGenerator(Node):
         result['plan_found'] = trajectory is not None
         return result
 
-    def generate_dataset(self, output_path, object_name):
-        rows = []
-        total = len(self.path_points)
-        scale_x, scale_y, scale_z = self.scale
+    def generate_dataset(self, output_path, object_name, angle_min, angle_max, row_spacing):
+        translation, quaternion = self._read_object_pose()
+        points, normals = self._build_path(translation, quaternion, angle_min, angle_max, row_spacing)
 
-        for i, (point, normal) in enumerate(zip(self.path_points, self.path_normals)):
+        scale_x, scale_y, scale_z = self.scale
+        rows = []
+        total = len(points)
+
+        for i, (point, normal) in enumerate(zip(points, normals)):
             quat = normal_to_quaternion(normal)
             result = self.check_reachable_and_collision_free(point, quat)
 
@@ -127,6 +132,9 @@ class DatasetGenerator(Node):
                 'nx': normal[0], 'ny': normal[1], 'nz': normal[2],
                 'qx': quat[0], 'qy': quat[1], 'qz': quat[2], 'qw': quat[3],
                 'scale_x': scale_x, 'scale_y': scale_y, 'scale_z': scale_z,
+                'angle_min': angle_min, 'angle_max': angle_max,
+                'row_spacing': row_spacing,
+                'paint_distance': PAINT_DISTANCE,
                 'ik_found': int(result['ik_found']),
                 'plan_found': int(result['plan_found']),
                 'reachable': int(result['ik_found'] and result['plan_found']),
@@ -135,21 +143,26 @@ class DatasetGenerator(Node):
             if (i + 1) % 25 == 0 or (i + 1) == total:
                 self.get_logger().info(f'Checked {i + 1}/{total} points')
 
+        if not rows:
+            self.get_logger().warn('No points generated for this test case — nothing to save.')
+            return
+
         file_exists = output_path.exists()
-        with open(output_path, 'a', newline='') as f:  # 'a' = append, not overwrite
+        with open(output_path, 'a', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
             if not file_exists:
-                writer.writeheader()  # only write header once, on first run
+                writer.writeheader()
             writer.writerows(rows)
 
         ik_ok = sum(r['ik_found'] for r in rows)
         plan_ok = sum(r['plan_found'] for r in rows)
         self.get_logger().info(
-            f'Appended {len(rows)} labeled points for "{object_name}" to {output_path}\n'
-            f'  Scale: {self.scale}\n'
+            f'Appended {len(rows)} labeled points for "{object_name}" '
+            f'(angle=[{angle_min},{angle_max}], row_spacing={row_spacing}) to {output_path}\n'
             f'  IK found: {ik_ok}/{len(rows)}\n'
             f'  Collision-free plan found: {plan_ok}/{len(rows)}'
         )
+
 
 def main(args=None):
     rclpy.init(args=args)

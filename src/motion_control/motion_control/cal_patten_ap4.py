@@ -17,11 +17,13 @@ from matplotlib.path import Path as MplPath
 from ament_index_python.packages import get_package_share_directory
 import xml.etree.ElementTree as ET
 
-ROW_SPACING = 0.1
+ROW_SPACING = 0.03
 ROBOT_POSITION = np.array([0.0, 0.0, -1.0])
-ANGLE_RANGES = ((90.0, 110.0),)
-LIFT_DISTANCE = 0.03
-
+ANGLE_RANGES = ((0.0, 180.0),)
+LIFT_DISTANCE = 0.05
+MIN_FACET_AREA=1e-6
+U_RESOLUTION=0.005
+PAINT_DISTANCE = 0.05  # fixed tool-to-surface offset in meters
 # ---------------------------------------------------------------------------
 # Step 0 — orientation / scale utilities (shared with ap3)
 # ---------------------------------------------------------------------------
@@ -155,7 +157,7 @@ def read_object_pose_from_launch(package_name='environment', launch_filename='ob
 # Step 1 — segment the object into meaningful surfaces
 # ---------------------------------------------------------------------------
 
-def segment_surfaces(mesh, robot_position=None, angle_ranges=((0.0, 90.0),), min_facet_area=1e-6):
+def segment_surfaces(mesh, robot_position=None, angle_ranges=ANGLE_RANGES, min_facet_area=MIN_FACET_AREA):
     """
     Detect planar facets (trimesh's built-in coplanar + connected clustering)
     and keep only the ones that are meaningful to paint: large enough, and
@@ -258,7 +260,7 @@ def determine_painting_direction(mesh, face_indices, normal):
 # Step 3 — generate parallel painting passes per surface
 # ---------------------------------------------------------------------------
 
-def generate_passes_for_surface(mesh, face_indices, normal, row_spacing, u_resolution=0.005):
+def generate_passes_for_surface(mesh, face_indices, normal, row_spacing, u_resolution=U_RESOLUTION, paint_distance=PAINT_DISTANCE):
     """
     Generate an edge-to-edge zigzag of parallel passes across one surface,
     swept along that surface's determined long-axis painting direction.
@@ -302,6 +304,7 @@ def generate_passes_for_surface(mesh, face_indices, normal, row_spacing, u_resol
             ordered_points.append(point_3d)
 
     ordered_points = np.array(ordered_points)
+    ordered_points = ordered_points + normal * paint_distance
     normals = np.tile(normal, (len(ordered_points), 1))
     return ordered_points, normals
 
@@ -310,7 +313,7 @@ def generate_passes_for_surface(mesh, face_indices, normal, row_spacing, u_resol
 # Step 4 — connect passes smoothly (across surfaces)
 # ---------------------------------------------------------------------------
 
-def connect_surfaces_smoothly(surface_paths, lift_distance=0.03, transition_steps=3):
+def connect_surfaces_smoothly(surface_paths, lift_distance, transition_steps=3):
     """
     Concatenate per-surface paths, inserting a short lift-off/retract/approach
     transition between surfaces instead of a raw jump, so the tool doesn't
@@ -359,9 +362,9 @@ def connect_surfaces_smoothly(surface_paths, lift_distance=0.03, transition_step
 # Full pipeline
 # ---------------------------------------------------------------------------
 
-def generate_surface_based_path(mesh, row_spacing, min_facet_area=1e-6,
-                                 robot_position=None, angle_ranges=((0.0, 90.0),),
-                                 lift_distance=0.03):
+def generate_surface_based_path(mesh, row_spacing, min_facet_area=MIN_FACET_AREA,
+                                 robot_position=None, angle_ranges=ANGLE_RANGES,
+                                 lift_distance=LIFT_DISTANCE, paint_distance=PAINT_DISTANCE):
     """Run the full 5-step pipeline and return one continuous trajectory."""
     surfaces = segment_surfaces(mesh, robot_position, angle_ranges, min_facet_area)
     if not surfaces:
@@ -369,7 +372,7 @@ def generate_surface_based_path(mesh, row_spacing, min_facet_area=1e-6,
 
     surface_paths = []
     for face_indices, normal, _ in surfaces:
-        points, normals = generate_passes_for_surface(mesh, face_indices, normal, row_spacing=row_spacing)
+        points, normals = generate_passes_for_surface(mesh, face_indices, normal, row_spacing=row_spacing , paint_distance=paint_distance)
         if len(points) == 0:
             continue
         surface_paths.append((points, normals))
@@ -378,6 +381,24 @@ def generate_surface_based_path(mesh, row_spacing, min_facet_area=1e-6,
         raise RuntimeError('No surfaces produced a usable path.')
 
     return connect_surfaces_smoothly(surface_paths, lift_distance=lift_distance)
+
+
+def check_pose_reachable(moveit2, position, quat_xyzw):
+    """
+    Two-stage check: does an IK solution exist, and can a collision-free
+    plan actually be found to reach it. No robot motion happens (plan only).
+    """
+    result = {'ik_found': False, 'plan_found': False}
+
+    joint_state = moveit2.compute_ik(position=position.tolist(), quat_xyzw=quat_xyzw)
+    if joint_state is None:
+        return result
+    result['ik_found'] = True
+
+    trajectory = moveit2.plan(position=position.tolist(), quat_xyzw=quat_xyzw)
+    result['plan_found'] = trajectory is not None
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -430,7 +451,7 @@ def visualize_path(mesh, points, normals, output_path='/tmp/surface_path.png', n
     plt.tight_layout()
     plt.savefig(output_path, dpi=200)
     print(f"Saved: {output_path}")
-
+"""
 
 def visualize_paint_coverage(points, normals, output_path='/tmp/surface_paint_coverage.png',
                               spray_radius=0.015, normal_length=0.02, max_disks=3000):
@@ -489,7 +510,135 @@ def visualize_paint_coverage(points, normals, output_path='/tmp/surface_paint_co
     plt.tight_layout()
     plt.savefig(output_path, dpi=150)
     print(f"Saved paint coverage visualization: {output_path}")
+"""
+def build_ribbon_quads(points, normals, width):
+    """
+    Build a series of quads forming a continuous ribbon along the path,
+    tangent to the surface (using each segment's normal) and perpendicular
+    to the direction of travel, with the given width (e.g. = row_spacing).
 
+    Returns:
+        quads: list of (4, 3) arrays, one per segment, each a flat quad polygon
+        colors: list of (r, g, b, a) tuples, one per quad, gradient by order
+    """
+    quads = []
+    n = len(points)
+
+    for i in range(n - 1):
+        p0 = points[i]
+        p1 = points[i + 1]
+        normal = normals[i]
+        normal = normal / np.linalg.norm(normal)
+
+        direction = p1 - p0
+        seg_length = np.linalg.norm(direction)
+        if seg_length < 1e-9:
+            continue
+        direction = direction / seg_length
+
+        # perpendicular to both travel direction and surface normal —
+        # this is the "across the stroke" axis, in the tangent plane
+        side = np.cross(direction, normal)
+        side_norm = np.linalg.norm(side)
+        if side_norm < 1e-9:
+            continue
+        side = side / side_norm
+
+        half_width = width / 2.0
+        offset = side * half_width
+
+        quad = np.array([
+            p0 - offset,
+            p0 + offset,
+            p1 + offset,
+            p1 - offset,
+        ])
+        quads.append(quad)
+
+    colors = []
+    for i in range(len(quads)):
+        t = i / max(len(quads) - 1, 1)
+        colors.append((t, t, 1.0 - t, 0.6))  # blue (start) -> yellow (end)
+
+    return quads, colors
+
+
+def visualize_paint_ribbon(mesh, points, normals, row_spacing, output_path='/tmp/paint_ribbon.png'):
+    """Render the painting path as a continuous colored ribbon (width =
+    row_spacing), tangent to the surface, instead of a thin line or disks."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+
+    fig = plt.figure(figsize=(12, 10))
+    ax = fig.add_subplot(111, projection='3d')
+
+    mesh_collection = Poly3DCollection(mesh.triangles, alpha=0.12, linewidths=0.1, facecolor='gray')
+    ax.add_collection3d(mesh_collection)
+
+    quads, colors = build_ribbon_quads(points, normals, row_spacing)
+    ribbon = Poly3DCollection(quads, facecolors=colors, edgecolors='none')
+    ax.add_collection3d(ribbon)
+
+    ax.set_xlabel("X (m)")
+    ax.set_ylabel("Y (m)")
+    ax.set_zlabel("Z (m)")
+    ax.set_title(f"Paint coverage ribbon — width = row_spacing ({row_spacing} m)")
+
+    bounds = mesh.bounds
+    center = bounds.mean(axis=0)
+    max_range = (bounds[1] - bounds[0]).max() / 2
+    ax.set_xlim(center[0] - max_range, center[0] + max_range)
+    ax.set_ylim(center[1] - max_range, center[1] + max_range)
+    ax.set_zlim(center[2] - max_range, center[2] + max_range)
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=200)
+    print(f"Saved: {output_path}")
+
+
+
+def visualize_reachability(mesh, reachable_points, unreachable_points, output_path='/tmp/reachability.png'):
+    """Show the object with reachable points as a green path and
+    unreachable points marked as red X's."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+
+    fig = plt.figure(figsize=(12, 10))
+    ax = fig.add_subplot(111, projection='3d')
+
+    mesh_collection = Poly3DCollection(mesh.triangles, alpha=0.12, linewidths=0.1, facecolor='gray')
+    ax.add_collection3d(mesh_collection)
+
+    if len(reachable_points) > 0:
+        ax.plot(reachable_points[:, 0], reachable_points[:, 1], reachable_points[:, 2],
+                color='green', linewidth=1.5, label=f'reachable ({len(reachable_points)})')
+        ax.scatter(reachable_points[:, 0], reachable_points[:, 1], reachable_points[:, 2],
+                   color='green', s=10)
+
+    if len(unreachable_points) > 0:
+        ax.scatter(unreachable_points[:, 0], unreachable_points[:, 1], unreachable_points[:, 2],
+                   color='red', marker='x', s=60, label=f'unreachable ({len(unreachable_points)})')
+
+    ax.set_xlabel("X (m)")
+    ax.set_ylabel("Y (m)")
+    ax.set_zlabel("Z (m)")
+    ax.set_title("Reachability check — green = reachable path, red X = unreachable/blocked")
+    ax.legend()
+
+    bounds = mesh.bounds
+    center = bounds.mean(axis=0)
+    max_range = (bounds[1] - bounds[0]).max() / 2
+    ax.set_xlim(center[0] - max_range, center[0] + max_range)
+    ax.set_ylim(center[1] - max_range, center[1] + max_range)
+    ax.set_zlim(center[2] - max_range, center[2] + max_range)
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=200)
+    print(f"Saved: {output_path}")
 
 # ---------------------------------------------------------------------------
 # Entry point
@@ -520,12 +669,13 @@ def main():
         robot_position=ROBOT_POSITION,
         angle_ranges=ANGLE_RANGES,
         lift_distance=LIFT_DISTANCE,
+        paint_distance=PAINT_DISTANCE
     )
 
     print(f"Generated {len(points)} total path points across all surfaces")
 
     visualize_path(mesh, points, normals, '/tmp/surface_path.png')
-    visualize_paint_coverage(points, normals, output_path='/tmp/surface_paint_coverage.png', spray_radius=0.02)
+    visualize_paint_ribbon(mesh, points, normals, ROW_SPACING, output_path='/tmp/surface_paint_coverage.png')
 
 
 if __name__ == '__main__':

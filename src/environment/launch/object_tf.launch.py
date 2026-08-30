@@ -11,12 +11,12 @@ def generate_launch_description():
     robot_description = urdf_path.read_text(encoding='utf-8')
 
     return LaunchDescription([
-        DeclareLaunchArgument('x', default_value='0'),
-        DeclareLaunchArgument('y', default_value='0.7'),
+        DeclareLaunchArgument('x', default_value='-0.2'),
+        DeclareLaunchArgument('y', default_value='0.5'),
         DeclareLaunchArgument('z', default_value='1.2'),
-        DeclareLaunchArgument('roll', default_value='0.0'),
+        DeclareLaunchArgument('roll', default_value='1.57'),
         DeclareLaunchArgument('pitch', default_value='0.0'),
-        DeclareLaunchArgument('yaw', default_value='1.57'),
+        DeclareLaunchArgument('yaw', default_value='0.0'),
         DeclareLaunchArgument('parent_frame', default_value='world'),
         DeclareLaunchArgument('child_frame', default_value='object_link'),
 

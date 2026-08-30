@@ -21,10 +21,13 @@ from motion_control.cal_patten_ap4 import (
     euler_to_quaternion,
     quaternion_to_matrix4,
     generate_surface_based_path,
+    filter_path_by_reachability,
+    build_ribbon_quads,
     ROW_SPACING,
     ROBOT_POSITION,
     ANGLE_RANGES,
     LIFT_DISTANCE,
+    PAINT_DISTANCE,
 )
 """
 def euler_to_quaternion(roll, pitch, yaw):
@@ -164,6 +167,27 @@ class ActionSurfaceSegmentedPattern(Node):
         )
 
         self.path_points, self.path_normals = self._build_surface_path(translation, quaternion)
+        self.get_logger().info(f'Checking reachability for {len(all_points)} candidate points...')
+        (self.reachable_points, self.reachable_normals,
+         self.unreachable_points, self.unreachable_normals) = filter_path_by_reachability(
+            self.moveit2, all_points, all_normals, logger=self.get_logger()
+        )
+        self.get_logger().info(
+            f'{len(self.reachable_points)} reachable / {len(all_points)} total '
+            f'({len(self.unreachable_points)} unreachable, will be skipped)'
+        )
+
+        """self._publish_visualization()"""
+
+
+
+    def _read_object_pose(self):
+        translation, (roll, pitch, yaw) = read_object_pose_from_launch()
+        quaternion = euler_to_quaternion(roll, pitch, yaw)
+        self.get_logger().info(f'Object pose: pos={translation}, rpy=({roll}, {pitch}, {yaw})')
+        return translation, quaternion
+
+
 
     def _build_surface_path(self, translation, quaternion):
         scale = read_mesh_scale_from_urdf()
@@ -192,6 +216,30 @@ class ActionSurfaceSegmentedPattern(Node):
         self.get_logger().info(f'Built surface-segmented path with {len(points)} points')
         return points, normals
 
+    
+    def _build_full_path(self, translation, quaternion):
+        scale = read_mesh_scale_from_urdf()
+
+        mesh_path = Path(get_package_share_directory('environment')) / 'meshes' / 'obj.stl'
+        mesh = trimesh.load(mesh_path)
+        if isinstance(mesh, trimesh.Scene):
+            mesh = mesh.dump(concatenate=True)
+
+        mesh.apply_scale(scale)
+        mesh.apply_transform(quaternion_to_matrix4(quaternion))
+
+        points, normals = generate_surface_based_path(
+            mesh,
+            row_spacing=ROW_SPACING,
+            robot_position=ROBOT_POSITION,
+            angle_ranges=ANGLE_RANGES,
+            lift_distance=LIFT_DISTANCE,
+            paint_distance=PAINT_DISTANCE,
+        )
+        points = points + translation
+        return points, normals
+
+
     def move_to(self, position, quat_xyzw):
         self.moveit2.move_to_pose(
             position=position.tolist(),
@@ -200,11 +248,10 @@ class ActionSurfaceSegmentedPattern(Node):
             cartesian_max_step=0.002,
             cartesian_fraction_threshold=0.3,
         )
-        success = self.moveit2.wait_until_executed()
-        if success:
-            self.get_logger().info('Move succeeded')
-        else:
-            self.get_logger().warn('Move failed')
+        return self.moveit2.wait_until_executed()
+
+    
+
 
 
 def main(args=None):
