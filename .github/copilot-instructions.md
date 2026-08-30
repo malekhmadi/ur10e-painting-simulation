@@ -2,12 +2,12 @@
 
 ## Project Overview
 
-This repository contains a robotics project built with ROS 2 Humble on Ubuntu 22.04.
+This repository contains a robotics project built with ROS 2 Jazzy on Ubuntu 24.04.
 
-The project focuses on autonomous robotic manipulation using a Universal Robots arm with MoveIt 2.
+The project focuses on autonomous robotic manipulation using a Universal Robots UR10e arm with MoveIt 2.
 
 Current objective:
-- Simulate the robot in RViz
+- Simulate the robot in Gazebo Sim / GZ
 - Add environment objects as CollisionObjects
 - Generate painting trajectories
 - Execute trajectories safely with MoveIt
@@ -17,11 +17,13 @@ Current objective:
 
 ## Software Stack
 
-- ROS 2 Humble
+- Ubuntu 24.04
+- ROS 2 Jazzy
 - Python (rclpy)
 - MoveIt 2
-- Universal Robots ROS 2 Driver
-- RViz2
+- Universal Robots UR10e
+- Universal_Robots_ROS2_GZ_Simulation
+- Gazebo Sim / GZ (not Gazebo Classic)
 - tf2
 - URDF/Xacro
 - Colcon

@@ -1,236 +1,267 @@
-"""cal_pattern_ap5.py — DBSCAN-based ML surface segmentation for painting
-path generation. Instead of trimesh.facets (pure coplanar-triangle grouping),
-this clusters sampled surface points using both position and normal
-similarity, letting density-based clustering discover surface regions."""
+"""cal_pattern_ap5.py — face-level entry-point reachability checking.
 
-from pathlib import Path
+Instead of checking every point on every zigzag (expensive), this checks
+only the FIRST point when entering a face. If it fails, the next point in
+that same face is tried as an alternative entry point, and so on. Once a
+reachable entry point is found, the rest of that face's zigzag is trusted
+and included with no further per-point checks. Collision-aware transition
+checks only happen when moving from one face to the next — never inside
+a face's own zigzag.
 
-import numpy as np
-import trimesh
-from sklearn.cluster import DBSCAN
-from scipy.spatial import ConvexHull
-from matplotlib.path import Path as MplPath
-from ament_index_python.packages import get_package_share_directory
+This is a deliberate speed/thoroughness tradeoff versus cal_pattern_ap6.py's
+exhaustive per-point checking: far fewer MoveIt calls, at the cost of not
+guaranteeing every single point mid-zigzag is individually verified.
 
-# reuse shared utilities already built and tested in ap4 — single source of truth
+Data flow (same shape as ap6, for compatibility with shared visualizers):
+  all_surfaces
+    -> surface
+      -> strokes (one per surface)
+        -> points, normals, entry_index, entry_attempts
+
+  valid_face_segments
+    -> points from entry_index onward (untested points are trusted)
+
+  face_transitions
+    -> MoveIt-checked connections between consecutive face segments
+"""
+
+import rclpy
+from rclpy.node import Node
+from rclpy.callback_groups import ReentrantCallbackGroup
+from pymoveit2 import MoveIt2
+from pymoveit2.robots import ur
+
 from motion_control.cal_patten_ap4 import (
-    euler_to_quaternion,
-    quaternion_to_matrix4,
+    segment_surfaces,
+    generate_passes_for_surface,
     normal_to_quaternion,
-    read_mesh_scale_from_urdf,
-    read_object_pose_from_launch,
-    get_tangent_frame,
-    connect_surfaces_smoothly,
-
+    check_pose_reachable,
+)
+from motion_control.cal_patten_ap6 import (
+    load_and_prepare_mesh,
+    add_object_to_planning_scene,
+    visualize_all_surfaces,
+    visualize_raw_zigzags,
+    _apply_equal_bounds,
 )
 
 
 # ---------------------------------------------------------------------------
-# Shared painting parameters — same convention as ap4
-# ---------------------------------------------------------------------------
-ROW_SPACING = 0.05
-ROBOT_POSITION = np.array([0.0, 0.0, -1.0])
-ANGLE_RANGES = ((90.0, 110.0),)
-LIFT_DISTANCE = 0.03
-MARGIN_DISTANCE = 0.005
-
-NUM_SAMPLE_POINTS = 1000
-DBSCAN_EPS = 0.08          # max feature-space distance for two points to be neighbors
-DBSCAN_MIN_SAMPLES = 8     # min points to form a dense cluster
-SPATIAL_WEIGHT = 1.0       # relative importance of position in clustering
-NORMAL_WEIGHT = 2.0        # relative importance of normal direction (higher = stricter "flatness")
-
-
-# ---------------------------------------------------------------------------
-# Step 1 — ML-based surface segmentation via DBSCAN
+# PHASE 1+2 — generate all surfaces + their raw zigzag strokes (identical
+# to ap6's version; reused directly rather than duplicated)
 # ---------------------------------------------------------------------------
 
-def segment_surfaces_dbscan(mesh, num_points=NUM_SAMPLE_POINTS,
-                             eps=DBSCAN_EPS, min_samples=DBSCAN_MIN_SAMPLES,
-                             spatial_weight=SPATIAL_WEIGHT, normal_weight=NORMAL_WEIGHT):
+def generate_all_surfaces(mesh, row_spacing=None, robot_position=None,
+                           angle_ranges=None, paint_distance=None,
+                           min_facet_area=1e-6, logger=None):
+    from motion_control.cal_patten_ap4 import ROW_SPACING, ROBOT_POSITION, ANGLE_RANGES, PAINT_DISTANCE
+    row_spacing = row_spacing or ROW_SPACING
+    robot_position = robot_position if robot_position is not None else ROBOT_POSITION
+    angle_ranges = angle_ranges or ANGLE_RANGES
+    paint_distance = paint_distance if paint_distance is not None else PAINT_DISTANCE
+
+    surfaces = segment_surfaces(mesh, robot_position, angle_ranges, min_facet_area)
+    if not surfaces:
+        raise RuntimeError('No surfaces passed segmentation/filtering.')
+
+    all_surfaces = []
+    skipped = 0
+
+    for surface_id, (face_indices, normal, _) in enumerate(surfaces):
+        points, normals = generate_passes_for_surface(mesh, face_indices, normal, row_spacing=row_spacing)
+        if len(points) == 0:
+            skipped += 1
+            continue
+        if paint_distance:
+            points = points + normals * paint_distance
+
+        all_surfaces.append({
+            'surface_id': surface_id,
+            'normal': normal,
+            'strokes': [{
+                'stroke_id': 0,
+                'points': points,
+                'normals': normals,
+                'entry_index': None,
+                'entry_attempts': 0,
+            }],
+        })
+
+    if logger:
+        logger.info(f'PHASE 1+2: {len(all_surfaces)} surfaces generated ({skipped} skipped as degenerate)')
+        for s in all_surfaces:
+            for stroke in s['strokes']:
+                logger.info(f"  surface {s['surface_id']}: {len(stroke['points'])} points")
+
+    return all_surfaces
+
+
+# ---------------------------------------------------------------------------
+# PHASE 3 — face-entry-point reachability search
+# Try point[0]; if unreachable, try point[1]; etc, up to max_entry_attempts.
+# Stops as soon as a reachable entry point is found — everything after it
+# in that face's zigzag is trusted with NO further per-point checking.
+# ---------------------------------------------------------------------------
+
+def find_face_entry_points(moveit2, all_surfaces, max_entry_attempts=10, logger=None):
     """
-    Sample points across the mesh surface, then cluster them with DBSCAN
-    using a combined [position, normal] feature space — points close together
-    in space AND facing a similar direction get grouped into the same
-    surface region. Points DBSCAN labels as noise (-1) are discarded.
-
-    Returns:
-        clusters: list of (points, normals) tuples, one per discovered cluster,
-                  each already representing a paintable surface region
+    For each face's stroke, search forward through its points for the
+    first one that's IK-reachable and has a collision-free plan. Records
+    entry_index (or None if no point within max_entry_attempts worked).
     """
-    points, face_indices = trimesh.sample.sample_surface_even(mesh, count=num_points)
-    normals = mesh.face_normals[face_indices]
+    faces_reachable = 0
+    faces_skipped = 0
+    total_entry_checks = 0
 
-    # normalize each feature block independently before weighting, so position
-    # (meters) and normal (unit vectors, already -1..1) contribute comparably
-    pos_scale = mesh.bounding_box.extents.max()
-    features = np.hstack([
-        (points / pos_scale) * spatial_weight,
-        normals * normal_weight,
-    ])
+    for surface in all_surfaces:
+        for stroke in surface['strokes']:
+            points = stroke['points']
+            normals = stroke['normals']
+            attempts = min(max_entry_attempts, len(points))
 
-    clustering = DBSCAN(eps=eps, min_samples=min_samples).fit(features)
-    labels = clustering.labels_
+            found_index = None
+            for i in range(attempts):
+                quat = normal_to_quaternion(normals[i])
+                result = check_pose_reachable(moveit2, points[i], quat)
+                total_entry_checks += 1
 
-    unique_labels = sorted(set(labels) - {-1})  # drop noise label
-    clusters = []
-    for label in unique_labels:
-        mask = labels == label
-        cluster_points = points[mask]
-        cluster_normals = normals[mask]
-        clusters.append((cluster_points, cluster_normals))
+                if result['ik_found'] and result['plan_found']:
+                    found_index = i
+                    break
 
-    return clusters
+            stroke['entry_index'] = found_index
+            stroke['entry_attempts'] = attempts if found_index is None else found_index + 1
+
+            if found_index is not None:
+                faces_reachable += 1
+                if logger:
+                    logger.info(
+                        f"  surface {surface['surface_id']}: entry found at point "
+                        f"{found_index} (tried {found_index + 1} point(s)), "
+                        f"{len(points) - found_index} points trusted for this face"
+                    )
+            else:
+                faces_skipped += 1
+                if logger:
+                    logger.warn(
+                        f"  surface {surface['surface_id']}: NO reachable entry point "
+                        f"found in first {attempts} point(s) — face skipped entirely"
+                    )
+
+    if logger:
+        logger.info(
+            f'PHASE 3: {faces_reachable} faces have a valid entry point, '
+            f'{faces_skipped} faces skipped entirely, {total_entry_checks} total IK/plan checks made'
+        )
+
+    return all_surfaces
 
 
-def filter_and_order_clusters(clusters, robot_position=None, angle_ranges=((0.0, 90.0),)):
+# ---------------------------------------------------------------------------
+# PHASE 4 — build valid_face_segments from entry_index onward
+# Points before entry_index are dropped (they were tested and failed, or
+# never tested because search stopped early). Points from entry_index
+# onward are all included, untested, as one continuous segment.
+# ---------------------------------------------------------------------------
+
+def build_face_segments(all_surfaces, logger=None):
     """
-    Compute each cluster's mean normal + centroid, apply the same angle-range
-    facing filter used in ap4, and order clusters nearest-to-robot first.
+    PHASE 4: for every face with a valid entry_index, build one segment
+    containing all points from entry_index to the end of that face's
+    zigzag — preserving original order, no internal gap-checking.
     """
-    kept = []
-    for points, normals in clusters:
-        mean_normal = normals.mean(axis=0)
-        mean_normal = mean_normal / np.linalg.norm(mean_normal)
-        centroid = points.mean(axis=0)
+    valid_face_segments = []
+    segment_id = 0
 
-        distance = None
-        if robot_position is not None:
-            to_robot = robot_position - centroid
-            distance = np.linalg.norm(to_robot)
-            to_robot_dir = to_robot / distance if distance > 1e-9 else to_robot
-
-            cos_alignment = np.clip(np.dot(mean_normal, to_robot_dir), -1.0, 1.0)
-            angle_deg = np.degrees(np.arccos(cos_alignment))
-
-            if not any(lo <= angle_deg <= hi for lo, hi in angle_ranges):
+    for surface in all_surfaces:
+        for stroke in surface['strokes']:
+            if stroke['entry_index'] is None:
                 continue
 
-        kept.append((points, normals, mean_normal, centroid, distance))
+            entry = stroke['entry_index']
+            points = stroke['points'][entry:]
+            normals = stroke['normals'][entry:]
 
-    if robot_position is not None:
-        kept.sort(key=lambda item: item[4])
+            valid_face_segments.append({
+                'segment_id': segment_id,
+                'surface_id': surface['surface_id'],
+                'points': points,
+                'normals': normals,
+                'skipped_entry_points': stroke['points'][:entry],  # for visualization only
+            })
+            segment_id += 1
 
-    return kept
+    if logger:
+        logger.info(f'PHASE 4: {len(valid_face_segments)} valid face segments built')
+        for seg in valid_face_segments:
+            logger.info(f"  segment {seg['segment_id']} (surface {seg['surface_id']}): {len(seg['points'])} points")
+
+    return valid_face_segments
 
 
 # ---------------------------------------------------------------------------
-# Step 2 & 3 — painting direction + parallel passes per cluster
+# PHASE 5 — transitions ONLY between faces (never checked inside a face)
+# Offline approximation, same caveat as ap6: real order-dependent success
+# is only verified by actually executing in paintaction_ap5.py.
 # ---------------------------------------------------------------------------
 
-def generate_passes_for_cluster(points, mean_normal, row_spacing=0.05, u_resolution=0.005):
-    """
-    Build a zigzag raster across a DBSCAN cluster's point cloud, using PCA
-    on the in-plane projection to find the cluster's long axis (stroke
-    direction), same approach as ap4's per-facet version, adapted to work
-    on a scattered point cluster instead of a connected triangle patch.
-    """
-    origin = points.mean(axis=0)
-    u0, v0 = get_tangent_frame(mean_normal)
+def plan_face_transitions(moveit2, valid_face_segments, logger=None):
+    """For each consecutive pair of face segments, check whether MoveIt can
+    plan to the next face's entry pose — this is the ONLY collision-aware
+    check that happens between faces; nothing inside a face is re-checked."""
+    transitions = []
+    successes = 0
 
-    relative = points - origin
-    coords_2d = np.column_stack([relative @ u0, relative @ v0])
+    for i in range(len(valid_face_segments) - 1):
+        seg_a = valid_face_segments[i]
+        seg_b = valid_face_segments[i + 1]
 
-    if len(coords_2d) < 3:
-        return np.empty((0, 3)), np.empty((0, 3))
+        target_point = seg_b['points'][0]
+        target_normal = seg_b['normals'][0]
+        quat = normal_to_quaternion(target_normal)
 
-    cov = np.cov(coords_2d.T)
-    eigvals, eigvecs = np.linalg.eigh(cov)
-    long_axis_2d = eigvecs[:, np.argmax(eigvals)]
-    long_axis_3d = long_axis_2d[0] * u0 + long_axis_2d[1] * v0
+        trajectory = moveit2.plan(position=target_point.tolist(), quat_xyzw=quat)
+        success = trajectory is not None
 
-    v_axis, u_axis = get_tangent_frame(mean_normal, u_hint=long_axis_3d)
+        transitions.append({
+            'from_segment_id': seg_a['segment_id'],
+            'to_segment_id': seg_b['segment_id'],
+            'success': success,
+        })
+        successes += int(success)
 
-    u = relative @ u_axis
-    v = relative @ v_axis
-    points_2d = np.column_stack([u, v])
+    if logger:
+        logger.info(
+            f'PHASE 5: {successes}/{len(transitions)} face-to-face transitions succeeded '
+            f'(offline approximation — see paintaction_ap5.py for real execution-order check)'
+        )
 
-    try:
-        hull = ConvexHull(points_2d)
-        hull_points = points_2d[hull.vertices]
-    except Exception:
-        # degenerate cluster (collinear points, too few for a hull) — skip
-        return np.empty((0, 3)), np.empty((0, 3))
-
-    polygon = MplPath(hull_points)
-
-    v_min, v_max = points_2d[:, 1].min(), points_2d[:, 1].max()
-    u_min, u_max = points_2d[:, 0].min(), points_2d[:, 0].max()
-
-    num_rows = max(1, int(round((v_max - v_min) / row_spacing)))
-    u_samples = np.arange(u_min, u_max + u_resolution, u_resolution)
-
-    ordered_points = []
-    for i in range(num_rows + 1):
-        v_level = v_min + i * row_spacing
-        test_points = np.column_stack([u_samples, np.full_like(u_samples, v_level)])
-        inside = polygon.contains_points(test_points)
-
-        if not inside.any():
-            continue
-
-        u_inside = u_samples[inside]
-        u_start, u_end = u_inside.min(), u_inside.max()
-
-        if i % 2 == 1:
-            u_start, u_end = u_end, u_start
-
-        for uu in (u_start, u_end):
-            point_3d = origin + uu * u_axis + v_level * v_axis
-            ordered_points.append(point_3d)
-
-    ordered_points = np.array(ordered_points)
-    if len(ordered_points) == 0:
-        return np.empty((0, 3)), np.empty((0, 3))
-
-    normals_out = np.tile(mean_normal, (len(ordered_points), 1))
-    return ordered_points, normals_out
+    return transitions
 
 
 # ---------------------------------------------------------------------------
 # Full pipeline
 # ---------------------------------------------------------------------------
 
-def generate_dbscan_path(mesh, num_points=NUM_SAMPLE_POINTS, eps=DBSCAN_EPS,
-                          min_samples=DBSCAN_MIN_SAMPLES, row_spacing=0.05,
-                          robot_position=None, angle_ranges=((0.0, 90.0),),
-                          lift_distance=0.03, margin_distance=0.0):
-    """Full DBSCAN-based pipeline: sample -> cluster -> filter/order ->
-    per-cluster passes -> smooth connection -> one continuous trajectory."""
-    clusters = segment_surfaces_dbscan(mesh, num_points=num_points, eps=eps, min_samples=min_samples)
-    if not clusters:
-        raise RuntimeError('DBSCAN found no clusters — try increasing eps or lowering min_samples.')
+def build_full_pipeline(moveit2, max_entry_attempts=10, logger=None):
+    mesh, translation = load_and_prepare_mesh()
 
-    print(f'DBSCAN discovered {len(clusters)} raw clusters')
+    all_surfaces = generate_all_surfaces(mesh, logger=logger)
+    all_surfaces = find_face_entry_points(moveit2, all_surfaces, max_entry_attempts, logger=logger)
+    valid_face_segments = build_face_segments(all_surfaces, logger=logger)
+    transitions = plan_face_transitions(moveit2, valid_face_segments, logger=logger)
 
-    filtered = filter_and_order_clusters(clusters, robot_position, angle_ranges)
-    if not filtered:
-        raise RuntimeError('No clusters passed angle-range filtering — check angle_ranges or robot_position.')
-
-    print(f'{len(filtered)} clusters passed filtering, ordered nearest-to-robot first')
-
-    surface_paths = []
-    for points, normals, mean_normal, centroid, distance in filtered:
-        path_points, path_normals = generate_passes_for_cluster(points, mean_normal, row_spacing=row_spacing)
-        if len(path_points) == 0:
-            continue
-        if margin_distance:
-            path_points = path_points + path_normals * margin_distance
-        surface_paths.append((path_points, path_normals))
-
-    if not surface_paths:
-        raise RuntimeError('No clusters produced a usable path.')
-
-    return connect_surfaces_smoothly(surface_paths, lift_distance=lift_distance)
+    return mesh, all_surfaces, valid_face_segments, transitions
 
 
 # ---------------------------------------------------------------------------
-# Visualization
+# Visualization — reuses ap6's phase1/phase2 plots directly (relabeled);
+# phase4/5 needs its own version since the underlying data (entry-index
+# based, not per-point reachable arrays) is genuinely different.
 # ---------------------------------------------------------------------------
 
-def visualize_clusters(mesh, clusters, output_path='/tmp/dbscan_clusters.png'):
-    """Scatter-plot each DBSCAN cluster in a different color, over the mesh,
-    to sanity-check the segmentation before generating paths."""
+def visualize_face_segments_and_transitions(mesh, valid_face_segments, transitions,
+                                             output_path='/tmp/ap5_face_segments.png'):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
@@ -238,77 +269,32 @@ def visualize_clusters(mesh, clusters, output_path='/tmp/dbscan_clusters.png'):
 
     fig = plt.figure(figsize=(12, 10))
     ax = fig.add_subplot(111, projection='3d')
+    ax.add_collection3d(Poly3DCollection(mesh.triangles, alpha=0.08, linewidths=0.1, facecolor='gray'))
 
-    mesh_collection = Poly3DCollection(mesh.triangles, alpha=0.1, linewidths=0.1, facecolor='gray')
-    ax.add_collection3d(mesh_collection)
+    # red: points that were tried as an entry candidate and rejected
+    for seg in valid_face_segments:
+        skipped = seg['skipped_entry_points']
+        if len(skipped) > 0:
+            ax.scatter(skipped[:, 0], skipped[:, 1], skipped[:, 2], color='red', marker='x', s=40)
 
-    cmap = plt.get_cmap('tab20')
-    for i, (points, normals) in enumerate(clusters):
-        color = cmap(i % 20)
-        ax.scatter(points[:, 0], points[:, 1], points[:, 2], color=color, s=8, label=f'cluster {i}')
+    # green: each face segment, from its found entry point to the end,
+    # fully trusted (no internal per-point checking)
+    for seg in valid_face_segments:
+        pts = seg['points']
+        ax.plot(pts[:, 0], pts[:, 1], pts[:, 2], color='green', linewidth=2.5)
+        ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2], color='green', s=12)
 
-    ax.set_xlabel("X (m)")
-    ax.set_ylabel("Y (m)")
-    ax.set_zlabel("Z (m)")
-    ax.set_title(f"DBSCAN surface segmentation — {len(clusters)} clusters found")
-    if len(clusters) <= 15:
-        ax.legend(fontsize=6, loc='upper left', bbox_to_anchor=(1.05, 1))
+    # orange: face-to-face transitions only
+    for t in transitions:
+        seg_a = next(s for s in valid_face_segments if s['segment_id'] == t['from_segment_id'])
+        seg_b = next(s for s in valid_face_segments if s['segment_id'] == t['to_segment_id'])
+        p_a, p_b = seg_a['points'][-1], seg_b['points'][0]
+        style = '-' if t['success'] else '--'
+        color = 'orange' if t['success'] else 'darkred'
+        ax.plot([p_a[0], p_b[0]], [p_a[1], p_b[1]], [p_a[2], p_b[2]],
+                color=color, linestyle=style, linewidth=1.0, alpha=0.7)
 
-    bounds = mesh.bounds
-    center = bounds.mean(axis=0)
-    max_range = (bounds[1] - bounds[0]).max() / 2
-    ax.set_xlim(center[0] - max_range, center[0] + max_range)
-    ax.set_ylim(center[1] - max_range, center[1] + max_range)
-    ax.set_zlim(center[2] - max_range, center[2] + max_range)
-
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=200)
-    print(f"Saved: {output_path}")
-
-
-def visualize_path(mesh, points, normals, output_path='/tmp/dbscan_path.png', normal_length=0.03):
-    import matplotlib
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
-    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-
-    fig = plt.figure(figsize=(12, 10))
-    ax = fig.add_subplot(111, projection='3d')
-
-    mesh_collection = Poly3DCollection(mesh.triangles, alpha=0.15, linewidths=0.2)
-    ax.add_collection3d(mesh_collection)
-
-    ax.plot(points[:, 0], points[:, 1], points[:, 2], linewidth=1.5, label="trajectory")
-
-    scatter = ax.scatter(
-        points[:, 0], points[:, 1], points[:, 2],
-        c=np.arange(len(points)), cmap='viridis', s=15
-    )
-    fig.colorbar(scatter, ax=ax, label="path order")
-
-    step = max(1, len(points) // 60)
-    ax.quiver(
-        points[::step, 0], points[::step, 1], points[::step, 2],
-        normals[::step, 0], normals[::step, 1], normals[::step, 2],
-        length=normal_length, color='red', normalize=True
-    )
-
-    ax.scatter(*points[0], s=100, marker='o', color='green', label="START")
-    ax.scatter(*points[-1], s=100, marker='X', color='black', label="END")
-
-    ax.set_xlabel("X (m)")
-    ax.set_ylabel("Y (m)")
-    ax.set_zlabel("Z (m)")
-    ax.set_title("DBSCAN-segmented painting path")
-    ax.legend()
-
-    bounds = mesh.bounds
-    center = bounds.mean(axis=0)
-    max_range = (bounds[1] - bounds[0]).max() / 2
-    ax.set_xlim(center[0] - max_range, center[0] + max_range)
-    ax.set_ylim(center[1] - max_range, center[1] + max_range)
-    ax.set_zlim(center[2] - max_range, center[2] + max_range)
-
+    _apply_equal_bounds(ax, mesh)
     plt.tight_layout()
     plt.savefig(output_path, dpi=200)
     print(f"Saved: {output_path}")
@@ -318,39 +304,38 @@ def visualize_path(mesh, points, normals, output_path='/tmp/dbscan_path.png', no
 # Entry point
 # ---------------------------------------------------------------------------
 
+
+
 def main():
-    mesh_path = Path(get_package_share_directory('environment')) / 'meshes' / 'obj.stl'
-    print(f"Loading mesh: {mesh_path}")
+    rclpy.init()
+    node = Node('cal_pattern_ap5_check')
+    callback_group = ReentrantCallbackGroup()
+    moveit2 = MoveIt2(
+        node=node,
+        joint_names=ur.joint_names(),
+        base_link_name=ur.base_link_name(),
+        end_effector_name=ur.end_effector_name(),
+        group_name=ur.MOVE_GROUP_ARM,
+        callback_group=callback_group,
+    )
+    for _ in range(20):
+        rclpy.spin_once(node, timeout_sec=0.5)
 
-    mesh = trimesh.load(mesh_path)
-    if isinstance(mesh, trimesh.Scene):
-        mesh = mesh.dump(concatenate=True)
+    logger = node.get_logger()
+    add_object_to_planning_scene(moveit2, logger=logger)
 
-    scale = read_mesh_scale_from_urdf()
-    mesh.apply_scale(scale)
-
-    translation, (roll, pitch, yaw) = read_object_pose_from_launch()
-    quat = euler_to_quaternion(roll, pitch, yaw)
-    mesh.apply_transform(quaternion_to_matrix4(quat))
-    print(f"Applied rotation from launch file: roll={roll}, pitch={pitch}, yaw={yaw}")
-
-    # visualize raw clustering first, before filtering/path generation,
-    # to sanity-check DBSCAN parameters
-    clusters = segment_surfaces_dbscan(mesh)
-    visualize_clusters(mesh, clusters, output_path='/tmp/dbscan_clusters.png')
-
-    points, normals = generate_dbscan_path(
-        mesh,
-        row_spacing=ROW_SPACING,
-        robot_position=ROBOT_POSITION,
-        angle_ranges=ANGLE_RANGES,
-        lift_distance=LIFT_DISTANCE,
-        margin_distance=MARGIN_DISTANCE,
+    mesh, all_surfaces, valid_face_segments, transitions = build_full_pipeline(
+        moveit2, max_entry_attempts=10, logger=logger
     )
 
-    print(f"Generated {len(points)} total path points across all clusters")
+    visualize_all_surfaces(mesh, all_surfaces, output_path='/tmp/ap5_surfaces.png',
+                            title=f"Face-entry mode: {len(all_surfaces)} surfaces detected")
+    visualize_raw_zigzags(mesh, all_surfaces, output_path='/tmp/ap5_zigzags.png',
+                          title="Raw zigzag strokes per face (before entry-point search)")
+    visualize_face_segments_and_transitions(mesh, valid_face_segments, transitions)
 
-    visualize_path(mesh, points, normals, '/tmp/dbscan_path.png')
+    node.destroy_node()
+    rclpy.shutdown()
 
 
 if __name__ == '__main__':

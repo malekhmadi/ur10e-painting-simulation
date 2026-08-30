@@ -274,7 +274,14 @@ def generate_passes_for_surface(mesh, face_indices, normal, row_spacing, u_resol
     v = relative @ v_axis
     points_2d = np.column_stack([u, v])
 
-    hull = ConvexHull(points_2d)
+    if len(points_2d) < 3:
+        return np.empty((0, 3)), np.empty((0, 3))
+
+    try:
+        hull = ConvexHull(points_2d)
+    except Exception:
+        return np.empty((0, 3)), np.empty((0, 3))
+
     hull_points = points_2d[hull.vertices]
     polygon = MplPath(hull_points)
 
@@ -303,7 +310,10 @@ def generate_passes_for_surface(mesh, face_indices, normal, row_spacing, u_resol
             point_3d = origin + uu * u_axis + v_level * v_axis
             ordered_points.append(point_3d)
 
-    ordered_points = np.array(ordered_points)
+    if not ordered_points:
+        return np.empty((0, 3)), np.empty((0, 3))
+
+    ordered_points = np.asarray(ordered_points, dtype=float)
     ordered_points = ordered_points + normal * paint_distance
     normals = np.tile(normal, (len(ordered_points), 1))
     return ordered_points, normals
