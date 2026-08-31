@@ -12,9 +12,9 @@ def generate_launch_description():
 
     return LaunchDescription([
         DeclareLaunchArgument('x', default_value='-0.1'),
-        DeclareLaunchArgument('y', default_value='0.9'),
+        DeclareLaunchArgument('y', default_value='0.6'),
         DeclareLaunchArgument('z', default_value='1.0'),
-        DeclareLaunchArgument('roll', default_value='0.0'),
+        DeclareLaunchArgument('roll', default_value='0.0'),  # 180 degrees in radians
         DeclareLaunchArgument('pitch', default_value='0.0'),
         DeclareLaunchArgument('yaw', default_value='1.5708'),  # 90 degrees in radians
         DeclareLaunchArgument('parent_frame', default_value='world'),

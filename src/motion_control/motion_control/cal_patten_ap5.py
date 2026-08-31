@@ -25,6 +25,7 @@ Data flow (same shape as ap6, for compatibility with shared visualizers):
     -> MoveIt-checked connections between consecutive face segments
 """
 
+import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.callback_groups import ReentrantCallbackGroup
@@ -44,6 +45,161 @@ from motion_control.cal_patten_ap6 import (
     visualize_raw_zigzags,
     _apply_equal_bounds,
 )
+
+
+SIMPLIFICATION_THRESHOLD = 1.4
+SEGMENT_PRIORITY_Z_WEIGHT = 0.5
+SEGMENT_PRIORITY_Y_WEIGHT = 0.5
+
+
+def _surface_plane_basis(points, normal):
+    """Build a stable orthonormal basis on the surface plane for local zigzag analysis."""
+    normal = np.asarray(normal, dtype=float)
+    normal_norm = np.linalg.norm(normal)
+    if normal_norm < 1e-12:
+        return np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0])
+    normal = normal / normal_norm
+
+    axis_h = None
+    if len(points) >= 2:
+        for i in range(1, len(points)):
+            ref = points[i] - points[0]
+            ref = ref - np.dot(ref, normal) * normal
+            ref_norm = np.linalg.norm(ref)
+            if ref_norm > 1e-12:
+                axis_h = ref / ref_norm
+                break
+
+    if axis_h is None:
+        for axis in (np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0]), np.array([0.0, 0.0, 1.0])):
+            projected = axis - np.dot(axis, normal) * normal
+            projected_norm = np.linalg.norm(projected)
+            if projected_norm > 1e-12:
+                axis_h = projected / projected_norm
+                break
+
+    if axis_h is None:
+        axis_h = np.array([1.0, 0.0, 0.0]) - np.dot(np.array([1.0, 0.0, 0.0]), normal) * normal
+        axis_h_norm = np.linalg.norm(axis_h)
+        if axis_h_norm < 1e-12:
+            axis_h = np.array([0.0, 1.0, 0.0]) - np.dot(np.array([0.0, 1.0, 0.0]), normal) * normal
+            axis_h_norm = np.linalg.norm(axis_h)
+        if axis_h_norm < 1e-12:
+            axis_h = np.array([0.0, 0.0, 1.0]) - np.dot(np.array([0.0, 0.0, 1.0]), normal) * normal
+            axis_h_norm = np.linalg.norm(axis_h)
+        if axis_h_norm < 1e-12:
+            axis_h = np.array([1.0, 0.0, 0.0])
+        else:
+            axis_h = axis_h / axis_h_norm
+
+    axis_h = axis_h / np.linalg.norm(axis_h)
+    axis_v = np.cross(normal, axis_h)
+    axis_v_norm = np.linalg.norm(axis_v)
+    if axis_v_norm < 1e-12:
+        for axis in (np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0]), np.array([0.0, 0.0, 1.0])):
+            candidate = np.cross(normal, axis)
+            candidate_norm = np.linalg.norm(candidate)
+            if candidate_norm > 1e-12:
+                axis_v = candidate / candidate_norm
+                break
+    if np.linalg.norm(axis_v) < 1e-12:
+        axis_v = np.array([0.0, 1.0, 0.0]) - np.dot(np.array([0.0, 1.0, 0.0]), normal) * normal
+        axis_v_norm = np.linalg.norm(axis_v)
+        if axis_v_norm < 1e-12:
+            axis_v = np.array([0.0, 0.0, 1.0]) - np.dot(np.array([0.0, 0.0, 1.0]), normal) * normal
+            axis_v_norm = np.linalg.norm(axis_v)
+        if axis_v_norm < 1e-12:
+            axis_v = np.array([0.0, 1.0, 0.0])
+        else:
+            axis_v = axis_v / axis_v_norm
+    else:
+        axis_v = axis_v / np.linalg.norm(axis_v)
+
+    return axis_h, axis_v
+
+
+def simplify_small_zigzags(points, normals, surface_id=None,
+                          threshold=SIMPLIFICATION_THRESHOLD, logger=None):
+    """Collapse tiny local zigzag turns after raw stroke generation.
+
+    The raw generator creates row-by-row zigzags. In narrow regions, one axis of a
+    local turn can be much smaller than the other (for example a tiny horizontal
+    step inside a much larger vertical pass). In those cases, dropping the short
+    side-step keeps the path continuous and ordered while preserving the dominant
+    coverage direction.
+
+    The threshold is intentionally easy to tune: lower values preserve more of the
+    original zigzag, larger values simplify more aggressively. A default of 0.3
+    means the small side-step must be under 30% of the dominant axis before it is
+    removed, which keeps normal zigzags intact while reducing narrow-region noise.
+    """
+    points = np.asarray(points, dtype=float)
+    normals = np.asarray(normals, dtype=float)
+
+    if points.size == 0 or len(points) < 3:
+        return points, normals
+    if len(normals) != len(points):
+        return points, normals
+
+    normal = normals[0]
+    axis_h, axis_v = _surface_plane_basis(points, normal)
+
+    kept = [0]
+    simplified_horizontal = 0
+    simplified_vertical = 0
+
+    for i in range(1, len(points) - 1):
+        prev = points[i - 1]
+        curr = points[i]
+        nxt = points[i + 1]
+
+        d_prev = curr - prev
+        d_next = nxt - curr
+
+        horizontal_prev = abs(float(np.dot(d_prev, axis_h)))
+        vertical_prev = abs(float(np.dot(d_prev, axis_v)))
+        horizontal_next = abs(float(np.dot(d_next, axis_h)))
+        vertical_next = abs(float(np.dot(d_next, axis_v)))
+
+        horizontal_length = max(horizontal_prev, horizontal_next)
+        vertical_length = max(vertical_prev, vertical_next)
+
+        if horizontal_length > 0.0 and vertical_length > 0.0:
+            if horizontal_length < threshold * vertical_length:
+                simplified_horizontal += 1
+                if logger:
+                    logger.info(
+                        f"Simplified small horizontal zigzag on surface {surface_id} "
+                        f"(local span {horizontal_length:.6f} vs {vertical_length:.6f})"
+                    )
+                continue
+            if vertical_length < threshold * horizontal_length:
+                simplified_vertical += 1
+                if logger:
+                    logger.info(
+                        f"Simplified small vertical zigzag on surface {surface_id} "
+                        f"(local span {vertical_length:.6f} vs {horizontal_length:.6f})"
+                    )
+                continue
+
+        kept.append(i)
+
+    kept.append(len(points) - 1)
+    kept = sorted(set(kept))
+
+    if len(kept) < 2:
+        return points, normals
+
+    simplified_points = points[kept]
+    simplified_normals = normals[kept]
+
+    if logger and (simplified_horizontal or simplified_vertical):
+        logger.info(
+            f"surface {surface_id}: simplified {simplified_horizontal} horizontal and "
+            f"{simplified_vertical} vertical tiny zigzag apex(es); final path length {len(simplified_points)}"
+        )
+
+    return simplified_points, simplified_normals
 
 
 # ---------------------------------------------------------------------------
@@ -68,10 +224,21 @@ def generate_all_surfaces(mesh, row_spacing=None, robot_position=None,
     skipped = 0
 
     for surface_id, (face_indices, normal, _) in enumerate(surfaces):
-        points, normals = generate_passes_for_surface(mesh, face_indices, normal, row_spacing=row_spacing)
-        if len(points) == 0:
+        raw_points, raw_normals = generate_passes_for_surface(
+            mesh, face_indices, normal, row_spacing=row_spacing
+        )
+        if len(raw_points) == 0:
             skipped += 1
             continue
+
+        points, normals = simplify_small_zigzags(
+            raw_points,
+            raw_normals,
+            surface_id=surface_id,
+            threshold=SIMPLIFICATION_THRESHOLD,
+            logger=logger,
+        )
+
         if paint_distance:
             points = points + normals * paint_distance
 
@@ -205,16 +372,96 @@ def build_face_segments(all_surfaces, logger=None):
 # is only verified by actually executing in paintaction_ap5.py.
 # ---------------------------------------------------------------------------
 
+def prioritize_face_segments(valid_face_segments, logger=None,
+                            z_weight=SEGMENT_PRIORITY_Z_WEIGHT,
+                            y_weight=SEGMENT_PRIORITY_Y_WEIGHT):
+    
+    """Order segments by one combined centroid priority score.
+
+    This is intentionally a single scalar score and not a primary/secondary sort:
+        priority = z_weight * normalized_Z + y_weight * (1 - normalized_Y)
+
+    Higher Z and lower Y raise the score. We normalize Y and Z first so the two
+    factors are comparable before combining them. A stable tiebreaker on segment_id
+    prevents arbitrary flips when two centroids land on the same score.
+    """
+    if not valid_face_segments:
+        return []
+
+    centroids = []
+    for seg in valid_face_segments:
+        points = np.asarray(seg['points'], dtype=float)
+        if len(points) == 0:
+            centroids.append(np.array([0.0, 0.0, 0.0]))
+        else:
+            centroids.append(points.mean(axis=0))
+
+    centroids = np.asarray(centroids, dtype=float)
+    y_values = centroids[:, 1]
+    z_values = centroids[:, 2]
+
+    y_min = float(np.min(y_values)) if len(y_values) else 0.0
+    y_max = float(np.max(y_values)) if len(y_values) else 0.0
+    z_min = float(np.min(z_values)) if len(z_values) else 0.0
+    z_max = float(np.max(z_values)) if len(z_values) else 0.0
+
+    if len(y_values) > 1 and not np.isclose(y_max, y_min):
+        normalized_y = (y_values - y_min) / (y_max - y_min)
+    else:
+        normalized_y = np.zeros_like(y_values, dtype=float)
+
+    if len(z_values) > 1 and not np.isclose(z_max, z_min):
+        normalized_z = (z_values - z_min) / (z_max - z_min)
+    else:
+        normalized_z = np.zeros_like(z_values, dtype=float)
+
+    priority_scores = z_weight * normalized_z + y_weight * (-(1.0 - normalized_y))
+
+    ranked_indices = sorted(
+        range(len(valid_face_segments)),
+        key=lambda idx: (
+            -float(priority_scores[idx]),
+            int(valid_face_segments[idx].get('segment_id', idx)),
+        ),
+    )
+    ordered_segments = [valid_face_segments[i] for i in ranked_indices]
+
+    if logger:
+        logger.info(
+            f'PHASE 4.5: segment priority ordering with z_weight={z_weight}, '
+            f'y_weight={y_weight}'
+        )
+        for rank, idx in enumerate(ranked_indices, start=1):
+            seg = valid_face_segments[idx]
+            centroid = centroids[idx]
+            score = float(priority_scores[idx])
+            logger.info(
+                f"  rank {rank}: segment {seg['segment_id']} surface {seg['surface_id']} "
+                f"centroid=(y={centroid[1]:.6f}, z={centroid[2]:.6f}) "
+                f"priority={score:.6f}"
+            )
+        logger.info(
+            f"PHASE 4.5: final order = {[seg['segment_id'] for seg in ordered_segments]}"
+        )
+
+    return ordered_segments
+
+
 def plan_face_transitions(moveit2, valid_face_segments, logger=None):
     """For each consecutive pair of face segments, check whether MoveIt can
     plan to the next face's entry pose — this is the ONLY collision-aware
-    check that happens between faces; nothing inside a face is re-checked."""
+    check that happens between faces; nothing inside a face is re-checked.
+
+    The caller supplies the already-prioritized segment order. The internal point
+    order within each segment remains unchanged.
+    """
+    ordered_segments = list(valid_face_segments)
     transitions = []
     successes = 0
 
-    for i in range(len(valid_face_segments) - 1):
-        seg_a = valid_face_segments[i]
-        seg_b = valid_face_segments[i + 1]
+    for i in range(len(ordered_segments) - 1):
+        seg_a = ordered_segments[i]
+        seg_b = ordered_segments[i + 1]
 
         target_point = seg_b['points'][0]
         target_normal = seg_b['normals'][0]
@@ -249,7 +496,8 @@ def build_full_pipeline(moveit2, max_entry_attempts=10, logger=None):
     all_surfaces = generate_all_surfaces(mesh, logger=logger)
     all_surfaces = find_face_entry_points(moveit2, all_surfaces, max_entry_attempts, logger=logger)
     valid_face_segments = build_face_segments(all_surfaces, logger=logger)
-    transitions = plan_face_transitions(moveit2, valid_face_segments, logger=logger)
+    prioritized_segments = prioritize_face_segments(valid_face_segments, logger=logger)
+    transitions = plan_face_transitions(moveit2, prioritized_segments, logger=logger)
 
     return mesh, all_surfaces, valid_face_segments, transitions
 
@@ -277,27 +525,30 @@ def visualize_face_segments_and_transitions(mesh, valid_face_segments, transitio
         if len(skipped) > 0:
             ax.scatter(skipped[:, 0], skipped[:, 1], skipped[:, 2], color='red', marker='x', s=40)
 
-    # green: each face segment, from its found entry point to the end,
-    # fully trusted (no internal per-point checking)
-    for seg in valid_face_segments:
+    # segments colored by execution ORDER (not all uniform green anymore) —
+    # early segments = dark blue/purple, later segments = bright yellow,
+    # using the same viridis-style progression as other visualizations in
+    # this project, so "order" reads consistently across all plots
+    cmap = plt.get_cmap('viridis')
+    n = len(valid_face_segments)
+
+    for order_index, seg in enumerate(valid_face_segments):
+        t = order_index / max(n - 1, 1)
+        color = cmap(t)
         pts = seg['points']
-        ax.plot(pts[:, 0], pts[:, 1], pts[:, 2], color='green', linewidth=2.5)
-        ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2], color='green', s=12)
 
-    # orange: face-to-face transitions only
-    for t in transitions:
-        seg_a = next(s for s in valid_face_segments if s['segment_id'] == t['from_segment_id'])
-        seg_b = next(s for s in valid_face_segments if s['segment_id'] == t['to_segment_id'])
-        p_a, p_b = seg_a['points'][-1], seg_b['points'][0]
-        style = '-' if t['success'] else '--'
-        color = 'orange' if t['success'] else 'darkred'
-        ax.plot([p_a[0], p_b[0]], [p_a[1], p_b[1]], [p_a[2], p_b[2]],
-                color=color, linestyle=style, linewidth=1.0, alpha=0.7)
+        ax.plot(pts[:, 0], pts[:, 1], pts[:, 2], color=color, linewidth=2.5)
+        ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2], color=color, s=12)
 
-    _apply_equal_bounds(ax, mesh)
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=200)
-    print(f"Saved: {output_path}")
+        # label the segment's start point with its execution order number
+        start = pts[0]
+        ax.text(
+            start[0], start[1], start[2], f'{order_index + 1}',
+            color='black', fontsize=11, fontweight='bold',
+            bbox=dict(boxstyle='circle,pad=0.2', facecolor=color, edgecolor='black', alpha=0.9),
+        )
+
+    # orange: face-to-face transitions only, still shown as before
 
 
 # ---------------------------------------------------------------------------
